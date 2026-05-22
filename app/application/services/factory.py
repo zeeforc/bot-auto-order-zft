@@ -55,18 +55,24 @@ async def get_deposit_service() -> DepositService:
         return _deposit_service
 
     from app.infrastructure.database.factory import get_user_repository
-    from app.infrastructure.payment.tripay import get_tripay_client
+    from config.settings import PAYMENT_PROVIDER
 
     user_repo = await get_user_repository()
-    payment_gateway = get_tripay_client()  # None jika belum di-configure
+
+    # Jika pakai Tripay, inject TripayClient langsung (legacy path)
+    # Jika pakai Pakasir/lainnya, set None → deposit_service akan pakai generic provider
+    payment_gateway = None
+    if PAYMENT_PROVIDER == "tripay":
+        from app.infrastructure.payment.tripay import get_tripay_client
+        payment_gateway = get_tripay_client()
 
     _deposit_service = DepositService(
         user_repo=user_repo,
         payment_gateway=payment_gateway,
     )
 
-    mode = "real (Tripay)" if payment_gateway else "mock"
-    logger.info("✅ DepositService initialized (payment_gateway=%s)", mode)
+    mode = f"generic ({PAYMENT_PROVIDER})" if payment_gateway is None else "Tripay (direct)"
+    logger.info("✅ DepositService initialized (mode=%s)", mode)
     return _deposit_service
 
 

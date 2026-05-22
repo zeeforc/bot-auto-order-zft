@@ -32,6 +32,13 @@ ADMIN_IDS: list[int] = [
 
 # Payment Configuration
 QRIS_METHOD = os.getenv("QRIS_METHOD", "QRIS")  # Default: QRIS (no fee)
+PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "tripay")  # tripay / pakasir
+
+# Pakasir Configuration
+PAKASIR_BASE_URL = os.getenv("PAKASIR_BASE_URL", "https://app.pakasir.com")
+PAKASIR_PROJECT_SLUG = os.getenv("PAKASIR_PROJECT_SLUG", "")
+PAKASIR_API_KEY = os.getenv("PAKASIR_API_KEY", "")
+PAKASIR_PAYMENT_METHOD = os.getenv("PAKASIR_PAYMENT_METHOD", "qris")
 
 # Webhook Configuration
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")

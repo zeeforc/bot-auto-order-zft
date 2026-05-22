@@ -325,7 +325,7 @@ async def cmd_delvoucher(message: Message):
 
 @router.message(Command("testwebhook"))
 async def cmd_testwebhook(message: Message):
-    """Simulasi Tripay callback PAID untuk testing.
+    """Simulasi callback PAID untuk testing (works with any provider).
 
     Usage: /testwebhook ORDER_ID
     """
@@ -336,8 +336,8 @@ async def cmd_testwebhook(message: Message):
     if len(args) < 2:
         return await message.answer(
             "📋 <b>Format:</b>\n"
-            "<code>/testwebhook ORDER_ID</code>\n\n"
-            "Simulasi callback PAID dari Tripay.\n"
+            "/testwebhook ORDER_ID\n\n"
+            "Simulasi callback PAID.\n"
             "Order status akan di-update + notifikasi dikirim ke user."
         )
 
@@ -351,15 +351,15 @@ async def cmd_testwebhook(message: Message):
         # Check order exists
         order = await order_repo.get_by_id(order_id)
         if not order:
-            return await message.answer(f"⚠️ Order <code>{order_id}</code> tidak ditemukan.")
+            return await message.answer(f"⚠️ Order {order_id} tidak ditemukan.")
 
         if order.status != "pending":
             return await message.answer(
-                f"⚠️ Order <code>{order_id}</code> status sudah <b>{order.status}</b>.\n"
+                f"⚠️ Order {order_id} status sudah {order.status}.\n"
                 f"Hanya order 'pending' yang bisa di-test."
             )
 
-        # Simulate callback processing
+        # Simulate callback processing via Tripay handler (legacy, still works)
         from app.presentation.web.callbacks import _handle_order_callback
         await _handle_order_callback(
             order_id=order_id,
@@ -373,10 +373,10 @@ async def cmd_testwebhook(message: Message):
 
         await message.answer(
             f"✅ <b>Webhook Simulated!</b>\n\n"
-            f"• Order: <code>{order_id}</code>\n"
+            f"• Order: {order_id[:12]}\n"
             f"• Produk: {product_name}\n"
             f"• User: {order.user_id}\n"
-            f"• Status: pending → <b>paid</b>\n\n"
+            f"• Status: pending → paid\n\n"
             f"📨 Notifikasi sudah dikirim ke user."
         )
     except Exception as e:

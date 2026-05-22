@@ -134,7 +134,9 @@ async def run_bot() -> None:
 
     # Inject bot ke webhook handler untuk notifikasi
     from app.presentation.web.callbacks import set_bot
+    from app.presentation.web.pakasir_callback import set_bot as set_bot_pakasir
     set_bot(bot)
+    set_bot_pakasir(bot)
 
     # Register bot commands (different for admin vs user)
     await _register_commands(bot)
@@ -150,7 +152,11 @@ async def run_webhook_server() -> None:
     """Run FastAPI webhook server."""
     import uvicorn
     from app.presentation.web.callbacks import app as webhook_app
+    from app.presentation.web.pakasir_callback import pakasir_webhook
     from config.settings import WEBHOOK_PORT
+
+    # Register Pakasir webhook endpoint on same FastAPI app
+    webhook_app.post("/webhook/pakasir")(pakasir_webhook)
 
     config = uvicorn.Config(
         webhook_app,

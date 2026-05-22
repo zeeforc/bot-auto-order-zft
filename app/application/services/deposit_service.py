@@ -95,11 +95,35 @@ class DepositService:
 
             # Step 3: Generate payment via gateway
             if self._payment_gateway is None:
-                # Mock mode - return fake payment details
+                # Try generic provider (Pakasir, etc)
+                from app.infrastructure.payment.factory import get_active_provider
+                provider = get_active_provider()
+                if provider:
+                    result = await provider.create_deposit(user_id=user_id, amount=amount)
+                    if result.success:
+                        return DepositResult(
+                            success=True,
+                            payment_url=result.checkout_url,
+                            payment_ref=result.reference or result.merchant_ref,
+                            qr_url=None,
+                            qr_string=result.qr_string,
+                            amount=amount,
+                            fee=result.fee,
+                            total=result.total_amount,
+                            expired_at=result.expired_at,
+                        )
+                    else:
+                        return DepositResult(
+                            success=False,
+                            error_code="GATEWAY_ERROR",
+                            error_message=result.error or "Gagal membuat pembayaran.",
+                        )
+
+                # No gateway at all - mock mode
                 logger.warning("[deposit] PaymentGateway belum di-set, pakai mock")
                 return DepositResult(
                     success=True,
-                    payment_url="https://tripay.co.id/checkout/mock",
+                    payment_url="https://example.com/checkout/mock",
                     payment_ref=f"DEP-{user_id}-{amount}",
                     qr_url=None,
                     amount=amount,

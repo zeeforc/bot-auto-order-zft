@@ -447,27 +447,26 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
 
-        # Generate QRIS via Tripay
-        from app.infrastructure.payment.tripay import get_tripay_client
-        tripay = get_tripay_client()
+        # Generate QRIS via active payment provider
+        from app.infrastructure.payment.factory import get_active_provider
+        provider = get_active_provider()
 
-        if tripay:
-            # Real QRIS generation
-            payment_data = await tripay.create_order_payment(
+        if provider:
+            # Real payment generation
+            payment = await provider.create_payment(
                 order_id=result.order.id,
                 amount=total_cost,
                 product_name=product_data["name"],
                 user_id=callback.from_user.id,
             )
 
-            if "error" not in payment_data:
+            if payment.success:
                 # Success - show payment info
-                fee = payment_data.get("fee", 0)
-                total_pay = payment_data.get("total_amount", total_cost)
-                qr_string = payment_data.get("qr_string", "")
-                qr_url = payment_data.get("qr_url")
-                checkout_url = payment_data.get("checkout_url", "")
-                reference = payment_data.get("reference", "")
+                fee = payment.fee
+                total_pay = payment.total_amount
+                qr_string = payment.qr_string
+                checkout_url = payment.checkout_url
+                reference = payment.reference
 
                 # Format waktu
                 now = datetime.now()
@@ -480,7 +479,7 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
                     f"╭─────{{ ⏳ TRANSAKSI PENDING }}─────\n"
                     f"│\n"
                     f"│ • ID Payment  : <code>{reference}</code>\n"
-                    f"│ • Service     : QRIS\n"
+                    f"│ • Service     : QRIS ({provider.name})\n"
                     f"│ • Produk      : {product_data['name']}\n"
                     f"│ • Harga/Unit  : Rp {price_per_item:,}\n"
                     f"│ • Jumlah      : {qty}\n"
@@ -543,18 +542,19 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
                     _auto_expire_qris(callback.bot, qris_msg, result.order.id)
                 )
             else:
-                # Tripay error - show fallback
-                logger.error("[order] Tripay error: %s", payment_data.get("error"))
+                # Payment provider error - show fallback
+                logger.error("[order] Payment error: %s", payment.error)
                 caption_qris = (
                     f"————— [ ⏳ TRANSAKSI PENDING ] —————\n\n"
                     f"• Order ID : <code>{result.order.id}</code>\n"
                     f"• Produk : {product_data['name']}\n"
                     f"• Total : Rp {total_cost:,}\n\n"
                     f"⚠️ Gagal generate QRIS. Silakan coba lagi atau hubungi admin.\n"
+                    f"Error: {payment.error}\n"
                 )
                 await callback.message.answer(text=caption_qris)
         else:
-            # Mock mode (Tripay not configured)
+            # Mock mode (provider not configured)
             cancel_kb = InlineKeyboardBuilder()
             cancel_kb.button(text="❌ Batalkan Pembayaran", callback_data=f"qris:cancel:{result.order.id}")
 
@@ -563,7 +563,7 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
                 f"• Order ID : <code>{result.order.id}</code>\n"
                 f"• Service Payment : QRIS (mock)\n"
                 f"• Total : Rp {total_cost:,}\n\n"
-                f"⚠️ Tripay belum di-configure. Hubungi admin.\n"
+                f"⚠️ Payment gateway belum di-configure. Hubungi admin.\n"
             )
             try:
                 qris_msg = await callback.message.answer_photo(
