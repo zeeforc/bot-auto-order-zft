@@ -208,7 +208,7 @@ async def process_note_text(message: Message, state: FSMContext):
 
 # --- FLOW: KONFIRMASI ---
 async def render_confirmation_screen(message: Message, state: FSMContext):
-    """Render layar konfirmasi pesanan."""
+    """Render layar konfirmasi pesanan (dengan voucher jika ada)."""
     data = await state.get_data()
     product_data = data.get("product_data")
 
@@ -221,15 +221,56 @@ async def render_confirmation_screen(message: Message, state: FSMContext):
     price_per_item = wholesale if qty >= 200 else price
     total_price = price_per_item * qty
 
+    # Check voucher
+    discount = 0
+    voucher_code = ""
+    voucher_id = None
+    try:
+        from app.presentation.telegram.handlers.voucher import get_user_voucher
+        from app.application.services.factory import get_voucher_service
+        active_code = get_user_voucher(message.chat.id)
+        if active_code:
+            voucher_svc = await get_voucher_service()
+            v_result = await voucher_svc.validate_voucher(
+                code=active_code,
+                user_id=message.chat.id,
+                total_price=total_price,
+            )
+            if v_result.valid:
+                discount = v_result.discount
+                voucher_code = active_code
+                voucher_id = v_result.voucher.id
+    except Exception:
+        pass
+
+    final_price = total_price - discount
+
+    # Store voucher info in state for execution
+    await state.update_data(
+        _voucher_code=voucher_code,
+        _voucher_id=voucher_id,
+        _voucher_discount=discount,
+    )
+
     conf_text = (
         f"📄 <b>Konfirmasi Pesanan</b>\n\n"
         f"• Produk : {product_data['name']}\n"
         f"• Qty : {qty}\n"
         f"• Harga/unit : Rp {price_per_item:,}\n"
-        f"• Total : <b>Rp {total_price:,}</b>\n"
+        f"• Subtotal : Rp {total_price:,}\n"
+    )
+    if discount > 0:
+        conf_text += (
+            f"• Voucher : {voucher_code} (-Rp {discount:,})\n"
+            f"• <b>Total : Rp {final_price:,}</b>\n"
+        )
+    else:
+        conf_text += f"• <b>Total : Rp {total_price:,}</b>\n"
+
+    conf_text += (
         f"• Metode : {data['method'].upper()}\n\n"
         f"📝 Catatan untuk penjual:\n"
-        f"<code>{data['note']}</code>"
+        f"{data['note']}"
     )
     conf_msg = await message.answer(text=conf_text, reply_markup=kb.get_confirmation_keyboard())
 
@@ -261,6 +302,10 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
     method = data["method"]
     qty = data["qty"]
     note = data.get("note", "Tanpa catatan")
+    # Voucher data from confirmation screen
+    _voucher_code = data.get("_voucher_code", "")
+    _voucher_id = data.get("_voucher_id")
+    _voucher_discount = data.get("_voucher_discount", 0)
     # Capture tracked messages for cleanup after success
     _cleanup_msg_ids = data.get("_msg_ids", [])
     _cleanup_product_msg_id = data.get("_product_msg_id")
@@ -284,6 +329,10 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
         wholesale = product_data.get("wholesale", int(price * 0.9))
         price_per_item = wholesale if qty >= 200 else price
         total_cost = price_per_item * qty
+
+        # Apply voucher discount
+        if _voucher_discount > 0:
+            total_cost = max(0, total_cost - _voucher_discount)
 
         if user_balance < total_cost:
             await callback.answer(
@@ -409,6 +458,18 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
             delivered_accounts=delivery.formatted_text if delivery.success else "",
         )
 
+        # Apply voucher (mark as used) if applicable
+        if _voucher_id and _voucher_discount > 0:
+            try:
+                from app.application.services.factory import get_voucher_service
+                from app.presentation.telegram.handlers.voucher import clear_user_voucher
+                voucher_svc = await get_voucher_service()
+                await voucher_svc.apply_voucher(_voucher_id, callback.from_user.id, result.order.id)
+                clear_user_voucher(callback.from_user.id)
+                logger.info("[order] Voucher applied: code=%s discount=%s", _voucher_code, _voucher_discount)
+            except Exception as e:
+                logger.error("[order] Failed to apply voucher: %s", e)
+
         # Cleanup flow messages (variant detail, catatan, konfirmasi)
         chat_id = callback.message.chat.id
         cleanup_ids = list(_cleanup_msg_ids)
@@ -428,6 +489,10 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
         wholesale = product_data.get("wholesale", int(price * 0.9))
         price_per_item = wholesale if qty >= 200 else price
         total_cost = price_per_item * qty
+
+        # Apply voucher discount
+        if _voucher_discount > 0:
+            total_cost = max(0, total_cost - _voucher_discount)
 
         # Execute order (status = pending, with variant_id + unit_price)
         result = await order_service.execute_order(
@@ -484,6 +549,8 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
                     f"│ • Harga/Unit  : Rp {price_per_item:,}\n"
                     f"│ • Jumlah      : {qty}\n"
                 )
+                if _voucher_discount > 0:
+                    caption_qris += f"│ • Voucher     : {_voucher_code} (-Rp {_voucher_discount:,})\n"
                 if fee > 0:
                     caption_qris += f"│ • Fee         : Rp {fee:,}\n"
                 caption_qris += (
@@ -536,6 +603,18 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
                 flow_ids.append(callback.message.message_id)  # konfirmasi msg
                 flow_ids.append(qris_msg.message_id)          # QRIS msg itself
                 _track_msgs(result.order.id, callback.message.chat.id, flow_ids)
+
+                # Apply voucher (mark as used) for QRIS orders
+                if _voucher_id and _voucher_discount > 0:
+                    try:
+                        from app.application.services.factory import get_voucher_service
+                        from app.presentation.telegram.handlers.voucher import clear_user_voucher
+                        voucher_svc = await get_voucher_service()
+                        await voucher_svc.apply_voucher(_voucher_id, callback.from_user.id, result.order.id)
+                        clear_user_voucher(callback.from_user.id)
+                        logger.info("[order] Voucher applied (QRIS): code=%s discount=%s", _voucher_code, _voucher_discount)
+                    except Exception as e:
+                        logger.error("[order] Failed to apply voucher (QRIS): %s", e)
 
                 # Schedule auto-delete after 15 minutes
                 asyncio.create_task(

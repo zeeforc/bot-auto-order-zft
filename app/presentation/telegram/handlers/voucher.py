@@ -2,8 +2,7 @@
 Handler untuk voucher system.
 
 User commands:
-  - Ketik kode voucher saat checkout (di order flow)
-  - /voucher <code> - Check voucher info
+  - /voucher <code> - Check & activate voucher untuk checkout berikutnya
 
 Admin commands (di admin.py):
   - /addvoucher - Create voucher baru
@@ -11,6 +10,7 @@ Admin commands (di admin.py):
   - /delvoucher <id> - Deactivate voucher
 """
 import logging
+from typing import Dict, Optional
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -21,17 +21,30 @@ from app.application.services.factory import get_voucher_service
 logger = logging.getLogger(__name__)
 router = Router()
 
+# In-memory: user_id → voucher code yang aktif (belum dipakai)
+_active_vouchers: Dict[int, str] = {}
+
+
+def get_user_voucher(user_id: int) -> Optional[str]:
+    """Get active voucher code untuk user (dipanggil dari order flow)."""
+    return _active_vouchers.get(user_id)
+
+
+def clear_user_voucher(user_id: int) -> None:
+    """Clear voucher setelah dipakai (dipanggil dari order flow)."""
+    _active_vouchers.pop(user_id, None)
+
 
 @router.message(Command("voucher"))
 async def cmd_voucher(message: Message):
-    """Check voucher info: /voucher KODE"""
+    """Check voucher info & activate: /voucher KODE"""
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
             "📋 <b>Cara pakai voucher:</b>\n\n"
-            "Ketik: <code>/voucher KODE</code>\n"
-            "Contoh: <code>/voucher WELCOME10</code>\n\n"
-            "💡 Voucher akan otomatis di-apply saat checkout."
+            "Ketik: /voucher KODE\n"
+            "Contoh: /voucher WELCOME10\n\n"
+            "💡 Voucher akan otomatis di-apply saat checkout berikutnya."
         )
         return
 
@@ -60,12 +73,15 @@ async def cmd_voucher(message: Message):
     min_text = f"Rp {v.min_purchase:,}" if v.min_purchase > 0 else "Tidak ada"
     remaining = v.max_usage - v.used_count
 
+    # Activate voucher untuk user ini
+    _active_vouchers[message.from_user.id] = code
+
     text = (
         f"🎫 <b>VOUCHER: {v.code}</b>\n\n"
         f"• Diskon: {discount_text}{max_disc}\n"
         f"• Min. Pembelian: {min_text}\n"
         f"• Sisa Kuota: {remaining}x\n"
-        f"• Status: {'✅ Aktif' if v.is_valid() else '❌ Tidak Aktif'}\n\n"
-        f"💡 Voucher akan otomatis di-apply saat checkout."
+        f"• Status: ✅ Aktif\n\n"
+        f"✅ Voucher aktif! Diskon otomatis di-apply saat checkout berikutnya."
     )
     await message.answer(text)
