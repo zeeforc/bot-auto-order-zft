@@ -84,11 +84,13 @@ class OrderService:
                     error_message="Produk sedang tidak tersedia.",
                 )
 
-            if product.stock < quantity:
+            # Real-time stock check dari account_stock (bukan cached product.stock)
+            real_stock = await self._get_real_stock(product_id, variant_id)
+            if real_stock < quantity:
                 return OrderResult(
                     success=False,
                     error_code="INSUFFICIENT_STOCK",
-                    error_message=f"Stok tidak cukup. Tersisa {product.stock}.",
+                    error_message=f"Stok tidak cukup. Tersisa {real_stock}.",
                 )
 
             # Step 2: Hitung total harga (pakai unit_price jika ada, fallback ke product.price)
@@ -158,9 +160,35 @@ class OrderService:
         Rule: qty >= 200 pakai harga grosir (diskon ~10%).
         Untuk sekarang, grosir = price * 0.9 (bisa di-customize nanti).
         """
-        # TODO: Harga grosir bisa disimpan di DB nanti
-        # Untuk sekarang pakai simple discount 10% untuk qty >= 200
         price_per_item = product.price
         if quantity >= 200:
-            price_per_item = int(product.price * 0.9)  # 10% discount
+            price_per_item = int(product.price * 0.9)
         return price_per_item * quantity
+
+    async def _get_real_stock(self, product_id: int, variant_id: int | None) -> int:
+        """Get real-time stock dari account_stock table (bukan cached).
+
+        Ini lebih akurat daripada product.stock karena langsung count
+        akun yang available di pool.
+        """
+        try:
+            from app.infrastructure.database.connection import get_pool
+            pool = get_pool()
+            if not pool:
+                return 999  # Fallback: allow order jika DB ga reachable
+
+            async with pool.acquire() as conn:
+                if variant_id:
+                    count = await conn.fetchval(
+                        "SELECT COUNT(*) FROM account_stock WHERE variant_id = $1 AND is_used = FALSE",
+                        int(variant_id),
+                    )
+                else:
+                    count = await conn.fetchval(
+                        "SELECT COUNT(*) FROM account_stock WHERE product_id = $1 AND is_used = FALSE",
+                        int(product_id),
+                    )
+                return int(count) if count else 0
+        except Exception as e:
+            logger.warning("[order] _get_real_stock error: %s (fallback to allow)", e)
+            return 999  # Fallback: allow order, delivery will handle "akun belum tersedia"
