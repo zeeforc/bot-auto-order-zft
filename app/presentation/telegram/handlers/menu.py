@@ -140,7 +140,7 @@ async def menu_cara_order(message: Message):
         "4️⃣ Pilih metode pembayaran (Saldo / Buy Now)\n"
         "5️⃣ Isi catatan untuk penjual (opsional)\n"
         "6️⃣ Konfirmasi pesanan dan bayar - Selesai!\n\n"
-        "❓ Punya pertanyaan? Hubungi @zoroaze"
+        "❓ Punya pertanyaan? Hubungi admin"
     )
     await message.answer(text)
 

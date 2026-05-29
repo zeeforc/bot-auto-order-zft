@@ -69,29 +69,49 @@ async def cmd_admin(message: Message):
         "<b>Payment:</b>\n"
         "• /setqris - Ganti QRIS payment method\n"
         "• /getqris - Lihat QRIS method aktif\n\n"
+        "<b>Produk:</b>\n"
+        "• /addproduct - Tambah produk (step-by-step)\n"
+        "• /editproduct - Edit produk (interactive)\n"
+        "• /delproduct - Hapus produk\n"
+        "• /listproduct - List semua produk\n"
+        "• /restock ID QTY - Quick add stock\n"
+        "• /bulkadd - Add banyak produk sekaligus\n"
+        "• /hideproduct ID - Sembunyikan produk\n"
+        "• /showproduct ID - Tampilkan produk\n\n"
+        "<b>Variant:</b>\n"
+        "• /addvariant ID - Tambah variasi\n"
+        "• /editvariant ID - Edit variasi\n"
+        "• /delvariant ID - Hapus variasi\n"
+        "• /listvariant ID - List variasi\n"
+        "• /hidevariant ID - Sembunyikan variant\n"
+        "• /showvariant ID - Tampilkan variant\n\n"
+        "<b>Account Stock:</b>\n"
+        "• /addstock ID - Add akun ke variant\n"
+        "• /viewstock ID - Lihat stok akun\n"
+        "• /stockall - Summary stok semua produk\n"
+        "• /settemplate ID - Set format tampilan akun\n\n"
         "<b>Voucher:</b>\n"
         "• /addvoucher - Buat voucher baru\n"
         "• /listvoucher - List voucher aktif\n"
         "• /delvoucher ID - Hapus voucher\n\n"
-        "<b>Produk (Interactive):</b>\n"
-        "• /addproduct - Tambah produk (step-by-step)\n"
-        "• /editproduct - Edit produk (interactive)\n"
-        "• /delproduct - Hapus produk (interactive)\n"
-        "• /restock ID QTY - Quick add stock\n"
-        "• /listproduct - List semua produk\n"
-        "• /bulkadd - Add banyak produk sekaligus\n\n"
         "<b>User:</b>\n"
         "• /banuser USER_ID - Ban user\n"
         "• /unbanuser USER_ID - Unban user\n"
         "• /broadcast PESAN - Kirim ke semua user\n\n"
+        "<b>Refund:</b>\n"
+        "• /refund_approve ORDER_ID - Approve refund\n\n"
         "<b>Analytics:</b>\n"
-        "• /report [daily|weekly|monthly] - Laporan penjualan\n"
+        "• /report [daily|weekly|monthly] - Laporan\n"
         "• /topproducts - Produk terlaris\n"
         "• /topusers - User top spender\n\n"
-        "<b>Webhook:</b>\n"
-        "• /testwebhook ORDER_ID - Simulasi callback PAID\n"
-        "• /webhookinfo - Info webhook URL & status\n\n"
-        "<b>Info:</b>\n"
+        "<b>Bulk Operations:</b>\n"
+        "• /bulkdel product 1,2,3\n"
+        "• /bulkdel variant 1,2,3\n"
+        "• /bulkdel stock ID\n"
+        "• /bulkdel stockvar ID\n\n"
+        "<b>Webhook & Debug:</b>\n"
+        "• /testwebhook ORDER_ID - Simulasi PAID\n"
+        "• /webhookinfo - Info webhook\n"
         "• /stats - Statistik bot\n"
     )
     await message.answer(text)
@@ -1848,17 +1868,36 @@ async def cmd_unbanuser(message: Message):
 
 @router.message(Command("broadcast"))
 async def cmd_broadcast(message: Message):
-    """Broadcast pesan ke semua user. Usage: /broadcast PESAN"""
+    """Broadcast pesan ke semua user.
+
+    Usage:
+      /broadcast PESAN (text only)
+      Kirim foto dengan caption /broadcast PESAN (foto + text)
+    """
     if not _is_admin(message.from_user.id):
         return
 
-    text = message.text.replace("/broadcast", "", 1).strip()
-    if not text:
+    text = message.text.replace("/broadcast", "", 1).strip() if message.text else ""
+    caption = message.caption.replace("/broadcast", "", 1).strip() if message.caption else ""
+    photo = None
+
+    # Check if message has photo
+    if message.photo:
+        photo = message.photo[-1].file_id
+        text = caption or text
+    elif message.reply_to_message and message.reply_to_message.photo:
+        photo = message.reply_to_message.photo[-1].file_id
+        if not text and message.reply_to_message.caption:
+            text = message.reply_to_message.caption
+
+    if not text and not photo:
         return await message.answer(
             "📋 <b>Format:</b>\n"
-            "<code>/broadcast PESAN</code>\n\n"
+            "/broadcast PESAN\n\n"
+            "<b>Dengan gambar:</b>\n"
+            "Kirim foto + caption /broadcast PESAN\n\n"
             "<b>Contoh:</b>\n"
-            "<code>/broadcast 🎉 Promo hari ini! Diskon 50% semua produk!</code>"
+            "/broadcast 🎉 Promo hari ini! Diskon 50%"
         )
 
     try:
@@ -1869,34 +1908,100 @@ async def cmd_broadcast(message: Message):
 
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT telegram_id FROM users WHERE is_banned = FALSE"
+                "SELECT telegram_id FROM users WHERE is_banned = FALSE AND telegram_id != $1",
+                message.from_user.id,  # Exclude admin from broadcast
             )
 
         if not rows:
             return await message.answer("⚠️ Tidak ada user di database.")
 
-        sent = 0
-        failed = 0
-        for row in rows:
-            try:
-                await message.bot.send_message(
-                    chat_id=row['telegram_id'],
-                    text=f"📢 <b>BROADCAST</b>\n\n{text}",
-                    parse_mode="HTML",
-                )
-                sent += 1
-            except Exception:
-                failed += 1
+        # Confirmation step
+        mode = "📷 Foto + Text" if photo else "📝 Text only"
+        preview = text[:100] + "..." if len(text) > 100 else text
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✅ Kirim Broadcast", callback_data="broadcast:confirm")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
+        kb.adjust(1)
 
         await message.answer(
-            f"📢 <b>BROADCAST SELESAI</b>\n\n"
-            f"• Terkirim : {sent}\n"
-            f"• Gagal    : {failed}\n"
-            f"• Total    : {len(rows)}"
+            f"📢 <b>PREVIEW BROADCAST</b>\n\n"
+            f"• Mode: {mode}\n"
+            f"• Target: {len(rows)} user\n"
+            f"• Pesan: {preview}\n\n"
+            f"Yakin kirim?",
+            reply_markup=kb.as_markup(),
         )
-        logger.info("[admin] Broadcast sent: %s/%s", sent, len(rows))
+
+        # Store broadcast data for confirmation handler
+        # Using a simple module-level dict (keyed by admin_id)
+        _pending_broadcasts[message.from_user.id] = {
+            "text": text,
+            "photo": photo,
+            "rows": rows,
+        }
+
     except Exception as e:
         await message.answer(f"❌ Error: {str(e)}")
+
+
+# Pending broadcast storage (admin_id → data)
+_pending_broadcasts: dict = {}
+
+
+@router.callback_query(F.data == "broadcast:confirm")
+async def handle_broadcast_confirm(callback: CallbackQuery):
+    """Execute broadcast after admin confirmation."""
+    if not _is_admin(callback.from_user.id):
+        return await callback.answer("⛔", show_alert=True)
+
+    data = _pending_broadcasts.pop(callback.from_user.id, None)
+    if not data:
+        await callback.message.edit_text("⚠️ Broadcast expired. Kirim ulang /broadcast.")
+        return await callback.answer()
+
+    text = data["text"]
+    photo = data["photo"]
+    rows = data["rows"]
+    broadcast_text = f"📢 <b>BROADCAST</b>\n\n{text}" if text else ""
+
+    await callback.message.edit_text(f"📢 Mengirim broadcast ke {len(rows)} user...")
+    await callback.answer()
+
+    import asyncio
+    sent = 0
+    failed = 0
+
+    for row in rows:
+        try:
+            if photo:
+                await callback.bot.send_photo(
+                    chat_id=row['telegram_id'],
+                    photo=photo,
+                    caption=broadcast_text,
+                    parse_mode="HTML",
+                )
+            else:
+                await callback.bot.send_message(
+                    chat_id=row['telegram_id'],
+                    text=broadcast_text,
+                    parse_mode="HTML",
+                )
+            sent += 1
+        except Exception:
+            failed += 1
+
+        # Rate limit: 25 msg/sec (safe margin under Telegram's 30/sec limit)
+        if sent % 25 == 0:
+            await asyncio.sleep(1.1)
+
+    await callback.message.edit_text(
+        f"📢 <b>BROADCAST SELESAI</b>\n\n"
+        f"• Terkirim : {sent}\n"
+        f"• Gagal    : {failed}\n"
+        f"• Total    : {len(rows)}\n"
+        f"• Mode     : {'📷 Foto + Text' if photo else '📝 Text only'}"
+    )
+    logger.info("[admin] Broadcast sent: %s/%s (photo=%s)", sent, len(rows), bool(photo))
 
 
 # ======================================================================
@@ -2874,3 +2979,144 @@ async def cmd_bulkdel(message: Message):
         await message.answer("⚠️ Format ID salah. Gunakan angka dipisah koma.")
     except Exception as e:
         await message.answer(f"❌ Error: {str(e)}")
+
+
+# ======================================================================
+# HIDE / SHOW PRODUCT & VARIANT
+# ======================================================================
+
+@router.message(Command("hideproduct"))
+async def cmd_hideproduct(message: Message):
+    """Hide product dari katalog. Usage: /hideproduct ID"""
+    if not _is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()
+    if len(args) < 2:
+        return await message.answer(
+            "📋 <b>Format:</b>\n"
+            "/hideproduct ID\n\n"
+            "Produk akan disembunyikan dari katalog user.\n"
+            "💡 Gunakan /showproduct ID untuk menampilkan kembali."
+        )
+
+    try:
+        product_id = int(args[1])
+        from app.infrastructure.database.connection import get_pool
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE products SET is_active = FALSE WHERE id = $1 RETURNING id, name",
+                product_id,
+            )
+        if row:
+            await message.answer(f"✅ Produk <b>{row['name']}</b> (ID {row['id']}) disembunyikan dari katalog.")
+            logger.info("[admin] Product hidden: id=%s", product_id)
+        else:
+            await message.answer(f"⚠️ Produk ID {product_id} tidak ditemukan.")
+    except ValueError:
+        await message.answer("⚠️ ID harus angka.")
+    except Exception as e:
+        await message.answer(f"❌ Error: {e}")
+
+
+@router.message(Command("showproduct"))
+async def cmd_showproduct(message: Message):
+    """Show product kembali di katalog. Usage: /showproduct ID"""
+    if not _is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()
+    if len(args) < 2:
+        return await message.answer(
+            "📋 <b>Format:</b>\n"
+            "/showproduct ID\n\n"
+            "Produk akan ditampilkan kembali di katalog user."
+        )
+
+    try:
+        product_id = int(args[1])
+        from app.infrastructure.database.connection import get_pool
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE products SET is_active = TRUE WHERE id = $1 RETURNING id, name",
+                product_id,
+            )
+        if row:
+            await message.answer(f"✅ Produk <b>{row['name']}</b> (ID {row['id']}) ditampilkan kembali di katalog.")
+            logger.info("[admin] Product shown: id=%s", product_id)
+        else:
+            await message.answer(f"⚠️ Produk ID {product_id} tidak ditemukan.")
+    except ValueError:
+        await message.answer("⚠️ ID harus angka.")
+    except Exception as e:
+        await message.answer(f"❌ Error: {e}")
+
+
+@router.message(Command("hidevariant"))
+async def cmd_hidevariant(message: Message):
+    """Hide variant dari katalog. Usage: /hidevariant VARIANT_ID"""
+    if not _is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()
+    if len(args) < 2:
+        return await message.answer(
+            "📋 <b>Format:</b>\n"
+            "/hidevariant VARIANT_ID\n\n"
+            "Variant akan disembunyikan dari pilihan user."
+        )
+
+    try:
+        variant_id = int(args[1])
+        from app.infrastructure.database.connection import get_pool
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE product_variants SET is_active = FALSE WHERE id = $1 RETURNING id, name",
+                variant_id,
+            )
+        if row:
+            await message.answer(f"✅ Variant <b>{row['name']}</b> (ID {row['id']}) disembunyikan.")
+            logger.info("[admin] Variant hidden: id=%s", variant_id)
+        else:
+            await message.answer(f"⚠️ Variant ID {variant_id} tidak ditemukan.")
+    except ValueError:
+        await message.answer("⚠️ ID harus angka.")
+    except Exception as e:
+        await message.answer(f"❌ Error: {e}")
+
+
+@router.message(Command("showvariant"))
+async def cmd_showvariant(message: Message):
+    """Show variant kembali. Usage: /showvariant VARIANT_ID"""
+    if not _is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()
+    if len(args) < 2:
+        return await message.answer(
+            "📋 <b>Format:</b>\n"
+            "/showvariant VARIANT_ID\n\n"
+            "Variant akan ditampilkan kembali."
+        )
+
+    try:
+        variant_id = int(args[1])
+        from app.infrastructure.database.connection import get_pool
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE product_variants SET is_active = TRUE WHERE id = $1 RETURNING id, name",
+                variant_id,
+            )
+        if row:
+            await message.answer(f"✅ Variant <b>{row['name']}</b> (ID {row['id']}) ditampilkan kembali.")
+            logger.info("[admin] Variant shown: id=%s", variant_id)
+        else:
+            await message.answer(f"⚠️ Variant ID {variant_id} tidak ditemukan.")
+    except ValueError:
+        await message.answer("⚠️ ID harus angka.")
+    except Exception as e:
+        await message.answer(f"❌ Error: {e}")

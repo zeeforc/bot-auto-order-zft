@@ -77,12 +77,27 @@ async def format_product_list(page: int) -> str:
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     """Handle /start command."""
-    # Ensure user exists in DB
+    logger.info("[start] /start from user_id=%s username=%s", message.from_user.id, message.from_user.username)
+
+    # Ensure user exists in DB (with username sync)
     try:
         user_repo = await get_user_repository()
-        await user_repo.get_or_create(message.from_user.id)
+        username = message.from_user.username  # bisa None
+        await user_repo.get_or_create(message.from_user.id, username=username)
     except Exception as e:
         logger.error("[start] Failed to get_or_create user: %s", e)
+
+    # Warning jika user belum punya username Telegram
+    if not message.from_user.username:
+        try:
+            await message.answer(
+                "⚠️ <b>Akun kamu belum punya username Telegram!</b>\n\n"
+                "Untuk keamanan transaksi, silakan buat username dulu:\n"
+                "Telegram → Settings → Username\n\n"
+                "Tanpa username, transaksi kamu mungkin tidak bisa diproses."
+            )
+        except Exception as e:
+            logger.error("[start] Failed to send username warning: %s", e)
 
     total_products = await _get_total_products()
     tp = await _total_pages()
@@ -94,17 +109,24 @@ async def cmd_start(message: Message):
             caption=await format_product_list(page=1),
             reply_markup=get_pagination_keyboard(current_page=1, total_pages=tp)
         )
-    except Exception:
-        await message.answer(
-            text=await format_product_list(page=1),
-            reply_markup=get_pagination_keyboard(current_page=1, total_pages=tp)
-        )
+    except Exception as e:
+        logger.error("[start] Failed to send banner photo: %s", e)
+        try:
+            await message.answer(
+                text=await format_product_list(page=1),
+                reply_markup=get_pagination_keyboard(current_page=1, total_pages=tp)
+            )
+        except Exception as e2:
+            logger.error("[start] Failed to send text fallback: %s", e2)
 
     # Trigger reply keyboard
-    await message.answer(
-        text="Sistem Otomatis 24 Jam Siap Melayani. Silakan gunakan menu di bawah.",
-        reply_markup=get_main_menu_keyboard(total_products=total_products)
-    )
+    try:
+        await message.answer(
+            text="Sistem Otomatis 24 Jam Siap Melayani. Silakan gunakan menu di bawah.",
+            reply_markup=get_main_menu_keyboard(total_products=total_products)
+        )
+    except Exception as e:
+        logger.error("[start] Failed to send reply keyboard: %s", e)
 
 
 @router.callback_query(F.data.startswith("page:"))

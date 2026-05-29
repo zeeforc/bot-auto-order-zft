@@ -85,6 +85,10 @@ async def _register_commands(bot: Bot) -> None:
         BotCommand(command="webhookinfo", description="Info webhook"),
         BotCommand(command="bulkdel", description="Bulk delete produk/variant/stock"),
         BotCommand(command="refund_approve", description="Approve refund: /refund_approve ORDER_ID"),
+        BotCommand(command="hideproduct", description="Sembunyikan produk: /hideproduct ID"),
+        BotCommand(command="showproduct", description="Tampilkan produk: /showproduct ID"),
+        BotCommand(command="hidevariant", description="Sembunyikan variant: /hidevariant ID"),
+        BotCommand(command="showvariant", description="Tampilkan variant: /showvariant ID"),
     ]
 
     # Set default commands (untuk semua user)

@@ -18,6 +18,7 @@ import logging
 from typing import Optional
 
 from fastapi import Request
+from config.settings import STORE_CONTACT
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
@@ -253,7 +254,7 @@ async def _handle_order_callback(order_id: str, amount: int) -> None:
                 f"{delivery_desc}\n\n"
                 f"────────────────────\n"
                 f"Apabila ada kendala pada akun silahkan forward detail transaksi sukses "
-                f"beserta kendala pada akun ke @zoroaze"
+                f"beserta kendala pada akun ke {STORE_CONTACT}"
             )
             await _bot.send_message(chat_id=order.user_id, text=msg2, parse_mode="HTML")
 
@@ -263,7 +264,7 @@ async def _handle_order_callback(order_id: str, amount: int) -> None:
         from config.settings import ADMIN_IDS
         user_repo = await get_user_repository()
         user_data = await user_repo.get_by_id(order.user_id)
-        username = user_data.username if user_data and user_data.username else f"id:{order.user_id}"
+        username = user_data.username if user_data and user_data.username else f"@id:{order.user_id}"
         now_str = dt.now().strftime("%d/%m/%Y %H:%M")
 
         delivered_text = delivery.formatted_text if delivery.success else ""

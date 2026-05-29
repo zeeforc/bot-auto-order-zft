@@ -22,6 +22,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.presentation.telegram.states import OrderStates
 from app.presentation.telegram.keyboards import order as kb
 from app.application.services.factory import get_order_service
+from config import settings
 
 QRIS_EXPIRE_SECONDS = 15 * 60  # 15 menit
 
@@ -36,7 +37,7 @@ async def _notify_admin_new_order(
     """Kirim notifikasi ke admin saat order PAID (saldo = instant paid)."""
     from config.settings import ADMIN_IDS
 
-    username = user.username if hasattr(user, 'username') and user.username else f"id:{user.id}"
+    username = user.username if hasattr(user, 'username') and user.username else f"@id:{user.id}"
     now = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     text = (
@@ -447,7 +448,7 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
                 f"{delivery_desc}\n\n"
                 f"────────────────────\n"
                 f"Apabila ada kendala pada akun silahkan forward detail transaksi sukses "
-                f"beserta kendala pada akun ke @zoroaze"
+                f"beserta kendala pada akun ke {settings.STORE_CONTACT}"
             )
             await callback.message.answer(msg2)
 
@@ -493,6 +494,16 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
         # Apply voucher discount
         if _voucher_discount > 0:
             total_cost = max(0, total_cost - _voucher_discount)
+
+        # Minimum amount check for payment gateway
+        if total_cost < 500:
+            await callback.message.answer(
+                f"⚠️ Total setelah diskon terlalu kecil (Rp {total_cost:,}).\n"
+                f"Minimal transaksi QRIS: Rp 500.\n\n"
+                f"Coba order tanpa voucher atau tambah qty."
+            )
+            await callback.answer()
+            return
 
         # Execute order (status = pending, with variant_id + unit_price)
         result = await order_service.execute_order(

@@ -47,8 +47,8 @@ class AsyncPgUserRepository(UserRepository):
     # ------------------------------------------------------------------
     # READ
     # ------------------------------------------------------------------
-    async def get_or_create(self, telegram_id: int) -> User:
-        """Ambil user atau buat baru jika belum ada."""
+    async def get_or_create(self, telegram_id: int, username: str | None = None) -> User:
+        """Ambil user atau buat baru jika belum ada. Update username jika berubah."""
         query = f"""
             SELECT {_USER_COLUMNS}
               FROM users
@@ -61,14 +61,22 @@ class AsyncPgUserRepository(UserRepository):
                 row = await conn.fetchrow(query, int(telegram_id))
 
                 if row:
-                    return _row_to_user(row)
+                    user = _row_to_user(row)
+                    # Update username jika berubah
+                    if username and user.username != username:
+                        await conn.execute(
+                            "UPDATE users SET username = $2 WHERE telegram_id = $1",
+                            int(telegram_id), username,
+                        )
+                        user.username = username
+                    return user
 
                 # User belum ada, buat baru
                 insert_query = """
-                    INSERT INTO users (telegram_id, balance, is_banned)
-                    VALUES ($1, 0, FALSE)
+                    INSERT INTO users (telegram_id, username, balance, is_banned)
+                    VALUES ($1, $2, 0, FALSE)
                     RETURNING """ + _USER_COLUMNS
-                new_row = await conn.fetchrow(insert_query, int(telegram_id))
+                new_row = await conn.fetchrow(insert_query, int(telegram_id), username)
                 return _row_to_user(new_row)
 
         except asyncpg.PostgresError:

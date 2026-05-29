@@ -361,28 +361,36 @@ async def _execute_refund_approval(
     if order.status not in ("paid", "shipped", "delivered"):
         return False, f"⚠️ Order tidak bisa di-refund.\nStatus saat ini: {order.status}"
 
-    # Atomic: add balance + update status
+    # Atomic: add balance + update status (single transaction to prevent double-refund)
     refund_amount = int(order.total_price)
-    added = await user_repo.add_balance(order.user_id, refund_amount)
-    if not added:
-        return False, "❌ Gagal tambah saldo user."
-
-    # Update status to 'refunded' (fall back to 'cancelled' if constraint blocks)
-    status_set = False
     try:
         if pool:
             async with pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE orders SET status = 'refunded' WHERE id = $1",
-                    order.id,
-                )
-                status_set = True
-    except Exception as e:
-        logger.warning("[refund_approve] 'refunded' status not allowed, using 'cancelled': %s", e)
+                async with conn.transaction():
+                    # Re-check status inside transaction (prevents race condition)
+                    current_status = await conn.fetchval(
+                        "SELECT status FROM orders WHERE id = $1 FOR UPDATE",
+                        order.id,
+                    )
+                    if current_status not in ("paid", "shipped", "delivered"):
+                        return False, f"⚠️ Order sudah di-proses (status: {current_status})."
 
-    if not status_set:
-        # Fallback to existing status enum
-        await order_repo.update_status(order.id, "cancelled")
+                    # Add balance
+                    added = await conn.fetchval(
+                        "UPDATE users SET balance = balance + $2 WHERE telegram_id = $1 RETURNING telegram_id",
+                        order.user_id, refund_amount,
+                    )
+                    if not added:
+                        return False, "❌ Gagal tambah saldo user."
+
+                    # Update status to refunded
+                    await conn.execute(
+                        "UPDATE orders SET status = 'refunded' WHERE id = $1",
+                        order.id,
+                    )
+    except Exception as e:
+        logger.error("[refund_approve] Transaction error: %s", e)
+        return False, f"❌ Gagal proses refund: {e}"
 
     # Get product info for messages
     product = await product_repo.get_by_id(order.product_id)
@@ -522,7 +530,6 @@ async def handle_refund_reject_reason(message: Message, state: FSMContext):
     if not reason:
         return await message.answer("⚠️ Alasan kosong, dibatalkan.")
 
-    # Send rejection to user
     try:
         await message.bot.send_message(
             chat_id=target_user_id,
@@ -530,11 +537,12 @@ async def handle_refund_reject_reason(message: Message, state: FSMContext):
                 f"❌ <b>REFUND DITOLAK</b>\n\n"
                 f"Order : {order_id_partial}\n"
                 f"Alasan : {reason}\n\n"
-                f"Hubungi @zoroaze jika ada pertanyaan."
+                f"Hubungi admin jika ada pertanyaan."
             ),
             parse_mode="HTML",
         )
         await message.answer(f"✅ Refund ditolak. Notifikasi dikirim ke user {target_user_id}.")
     except Exception as e:
         await message.answer(f"❌ Gagal kirim ke user: {e}")
+
 

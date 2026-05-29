@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 
 from app.application.services.factory import get_payment_service, get_deposit_service
 from app.infrastructure.payment.tripay import get_tripay_client
-from config.settings import WEBHOOK_SECRET
+from config.settings import WEBHOOK_SECRET, STORE_CONTACT
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +322,7 @@ async def _handle_order_callback(
                     f"{delivery_desc}\n\n"
                     f"────────────────────\n"
                     f"Apabila ada kendala pada akun silahkan forward detail transaksi sukses "
-                    f"beserta kendala pada akun ke @zoroaze"
+                    f"beserta kendala pada akun ke {STORE_CONTACT}"
                 )
                 await _bot.send_message(
                     chat_id=order.user_id,
@@ -342,23 +342,28 @@ async def _handle_order_callback(
             # Get username
             user_repo = await get_user_repository()
             user_data = await user_repo.get_by_id(order.user_id)
-            username = user_data.username if user_data and user_data.username else f"id:{order.user_id}"
+            username = user_data.username if user_data and user_data.username else f"@id:{order.user_id}"
             now = dt.now().strftime("%d/%m/%Y %H:%M")
 
             for admin_id in ADMIN_IDS:
                 try:
+                    admin_text = (
+                        f"🔔 <b>ORDER PAID</b>\n\n"
+                        f"Kode : {order_id[:8]}\n"
+                        f"Produk : {product_name}\n"
+                        f"Jumlah : {order.quantity}\n"
+                        f"Total : Rp {order.total_price:,}\n"
+                        f"Customer : @{username}\n"
+                        f"Tanggal : {now}\n"
+                    )
+                    if delivery.success and delivery.accounts:
+                        admin_text += f"\n📦 Akun terkirim:\n{delivery.formatted_text}\n"
+                    else:
+                        admin_text += "\n⚠️ Akun belum tersedia. Kirim manual ke user."
+
                     await _bot.send_message(
                         chat_id=admin_id,
-                        text=(
-                            f"🔔 <b>ORDER PAID</b>\n\n"
-                            f"Kode : {order_id[:8]}\n"
-                            f"Produk : {product_name}\n"
-                            f"Jumlah : {order.quantity}\n"
-                            f"Total : Rp {order.total_price:,}\n"
-                            f"Customer : @{username}\n"
-                            f"Tanggal : {now}\n\n"
-                            f"⚡ Segera kirim account details ke user!"
-                        ),
+                        text=admin_text,
                         parse_mode="HTML",
                     )
                 except Exception as e:
