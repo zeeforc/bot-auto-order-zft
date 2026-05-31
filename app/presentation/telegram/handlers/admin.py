@@ -1994,12 +1994,26 @@ async def handle_broadcast_confirm(callback: CallbackQuery):
         if sent % 25 == 0:
             await asyncio.sleep(1.1)
 
+    # Send preview of broadcast to admin (same as what users received)
+    if photo:
+        await callback.bot.send_photo(
+            chat_id=callback.from_user.id,
+            photo=photo,
+            caption=broadcast_text,
+            parse_mode="HTML",
+        )
+    else:
+        await callback.bot.send_message(
+            chat_id=callback.from_user.id,
+            text=broadcast_text,
+            parse_mode="HTML",
+        )
+
     await callback.message.edit_text(
         f"📢 <b>BROADCAST SELESAI</b>\n\n"
         f"• Terkirim : {sent}\n"
         f"• Gagal    : {failed}\n"
-        f"• Total    : {len(rows)}\n"
-        f"• Mode     : {'📷 Foto + Text' if photo else '📝 Text only'}"
+        f"• Total    : {len(rows)}"
     )
     logger.info("[admin] Broadcast sent: %s/%s (photo=%s)", sent, len(rows), bool(photo))
 
@@ -3118,5 +3132,185 @@ async def cmd_showvariant(message: Message):
             await message.answer(f"⚠️ Variant ID {variant_id} tidak ditemukan.")
     except ValueError:
         await message.answer("⚠️ ID harus angka.")
+    except Exception as e:
+        await message.answer(f"❌ Error: {e}")
+
+
+# ======================================================================
+# DELETE / EDIT INDIVIDUAL STOCK ACCOUNT
+# ======================================================================
+
+@router.message(Command("delstock"))
+async def cmd_delstock(message: Message):
+    """Hapus akun individual dari stock.
+
+    Usage:
+      /delstock ID              → hapus akun by account_stock ID
+      /delstock search EMAIL    → cari & hapus akun by data content
+
+    Contoh:
+      /delstock 142
+      /delstock search netflix@gmail.com
+    """
+    if not _is_admin(message.from_user.id):
+        return
+
+    args = message.text.split(maxsplit=2)
+    if len(args) < 2:
+        return await message.answer(
+            "📋 <b>Format:</b>\n"
+            "/delstock ID\n"
+            "/delstock search KEYWORD\n\n"
+            "<b>Contoh:</b>\n"
+            "/delstock 142\n"
+            "/delstock search netflix@gmail.com\n\n"
+            "💡 Gunakan /viewstock ID_PRODUK untuk lihat daftar akun + ID-nya"
+        )
+
+    from app.infrastructure.database.connection import get_pool
+    pool = get_pool()
+    if not pool:
+        return await message.answer("❌ Database tidak tersedia.")
+
+    mode = args[1].lower()
+
+    if mode == "search" and len(args) >= 3:
+        # Search mode: cari akun by content
+        keyword = args[2].strip()
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT s.id, s.account_data, s.is_used, s.variant_id, v.name as variant_name
+                       FROM account_stock s
+                       LEFT JOIN product_variants v ON v.id = s.variant_id
+                       WHERE s.account_data ILIKE $1
+                       LIMIT 10""",
+                    f"%{keyword}%",
+                )
+
+            if not rows:
+                return await message.answer(f"⚠️ Tidak ditemukan akun dengan keyword: {keyword}")
+
+            text = f"🔍 <b>Hasil pencarian: {keyword}</b>\n\n"
+            for r in rows:
+                status = "✅ Available" if not r['is_used'] else "❌ Used"
+                vname = r['variant_name'] or "N/A"
+                data_preview = r['account_data'][:40] + "..." if len(r['account_data']) > 40 else r['account_data']
+                text += f"[{r['id']}] {data_preview}\n    Variant: {vname} | {status}\n\n"
+
+            text += "💡 Hapus dengan: /delstock ID"
+            await message.answer(text)
+        except Exception as e:
+            await message.answer(f"❌ Error: {e}")
+
+    else:
+        # Direct delete by ID
+        try:
+            stock_id = int(mode)
+        except ValueError:
+            return await message.answer("⚠️ ID harus angka. Atau gunakan: /delstock search KEYWORD")
+
+        try:
+            async with pool.acquire() as conn:
+                # Get info dulu sebelum hapus
+                row = await conn.fetchrow(
+                    """SELECT s.id, s.account_data, s.is_used, s.variant_id, s.product_id,
+                              v.name as variant_name, p.name as product_name
+                       FROM account_stock s
+                       LEFT JOIN product_variants v ON v.id = s.variant_id
+                       LEFT JOIN products p ON p.id = s.product_id
+                       WHERE s.id = $1""",
+                    stock_id,
+                )
+
+                if not row:
+                    return await message.answer(f"⚠️ Account stock ID {stock_id} tidak ditemukan.")
+
+                # Hapus
+                await conn.execute("DELETE FROM account_stock WHERE id = $1", stock_id)
+
+                # Sync stock count variant + parent
+                if row['variant_id']:
+                    await conn.execute("""
+                        UPDATE product_variants SET stock = (
+                            SELECT COUNT(*) FROM account_stock
+                            WHERE variant_id = $1 AND is_used = FALSE
+                        ) WHERE id = $1
+                    """, row['variant_id'])
+                if row['product_id']:
+                    await conn.execute("""
+                        UPDATE products SET stock = COALESCE((
+                            SELECT SUM(CASE WHEN NOT is_used THEN 1 ELSE 0 END)
+                            FROM account_stock WHERE product_id = $1
+                        ), 0) WHERE id = $1
+                    """, row['product_id'])
+
+            data_preview = row['account_data'][:50]
+            status = "Available" if not row['is_used'] else "Used"
+            await message.answer(
+                f"✅ <b>AKUN DIHAPUS</b>\n\n"
+                f"• ID : {stock_id}\n"
+                f"• Data : {data_preview}\n"
+                f"• Produk : {row['product_name'] or 'N/A'}\n"
+                f"• Variant : {row['variant_name'] or 'N/A'}\n"
+                f"• Status : {status}"
+            )
+            logger.info("[admin] Stock deleted: id=%s data=%s", stock_id, data_preview)
+        except Exception as e:
+            await message.answer(f"❌ Error: {e}")
+
+
+@router.message(Command("editstock"))
+async def cmd_editstock(message: Message):
+    """Edit data akun individual.
+
+    Usage: /editstock ID DATA_BARU
+
+    Contoh:
+      /editstock 142 newemail@gmail.com|newpass123|Profile1|5678
+    """
+    if not _is_admin(message.from_user.id):
+        return
+
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        return await message.answer(
+            "📋 <b>Format:</b>\n"
+            "/editstock ID DATA_BARU\n\n"
+            "<b>Contoh:</b>\n"
+            "/editstock 142 newemail@gmail.com|newpass|Profile1|1234\n\n"
+            "💡 Gunakan /delstock search KEYWORD untuk cari ID akun"
+        )
+
+    try:
+        stock_id = int(args[1])
+    except ValueError:
+        return await message.answer("⚠️ ID harus angka.")
+
+    new_data = args[2].strip()
+    if not new_data:
+        return await message.answer("⚠️ Data baru tidak boleh kosong.")
+
+    from app.infrastructure.database.connection import get_pool
+    pool = get_pool()
+    if not pool:
+        return await message.answer("❌ Database tidak tersedia.")
+
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE account_stock SET account_data = $2 WHERE id = $1 RETURNING id, account_data",
+                stock_id, new_data,
+            )
+
+        if not row:
+            return await message.answer(f"⚠️ Account stock ID {stock_id} tidak ditemukan.")
+
+        await message.answer(
+            f"✅ <b>AKUN DIUPDATE</b>\n\n"
+            f"• ID : {stock_id}\n"
+            f"• Data Baru : {new_data[:60]}"
+        )
+        logger.info("[admin] Stock edited: id=%s", stock_id)
     except Exception as e:
         await message.answer(f"❌ Error: {e}")

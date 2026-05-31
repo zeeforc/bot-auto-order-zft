@@ -89,6 +89,8 @@ async def _register_commands(bot: Bot) -> None:
         BotCommand(command="showproduct", description="Tampilkan produk: /showproduct ID"),
         BotCommand(command="hidevariant", description="Sembunyikan variant: /hidevariant ID"),
         BotCommand(command="showvariant", description="Tampilkan variant: /showvariant ID"),
+        BotCommand(command="delstock", description="Hapus akun: /delstock ID atau search"),
+        BotCommand(command="editstock", description="Edit akun: /editstock ID DATA"),
     ]
 
     # Set default commands (untuk semua user)
