@@ -75,6 +75,8 @@ async def _register_commands(bot: Bot) -> None:
         BotCommand(command="banuser", description="Ban user"),
         BotCommand(command="unbanuser", description="Unban user"),
         BotCommand(command="broadcast", description="Broadcast ke semua user"),
+        BotCommand(command="broadcastpoll", description="Broadcast poll: /broadcastpoll Q|A|B|C"),
+        BotCommand(command="pollresult", description="Lihat hasil poll"),
         BotCommand(command="report", description="Laporan penjualan"),
         BotCommand(command="topproducts", description="Produk terlaris"),
         BotCommand(command="topusers", description="User top spender"),

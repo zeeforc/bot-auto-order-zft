@@ -2018,6 +2018,227 @@ async def handle_broadcast_confirm(callback: CallbackQuery):
     logger.info("[admin] Broadcast sent: %s/%s (photo=%s)", sent, len(rows), bool(photo))
 
 
+@router.message(Command("broadcastpoll"))
+async def cmd_broadcastpoll(message: Message):
+    """Broadcast poll/voting ke semua user.
+
+    Usage: /broadcastpoll PERTANYAAN|OPSI1|OPSI2|OPSI3
+    Contoh: /broadcastpoll Kalo aku open PO Capcut 1B mau ga?|Mau banget|Mungkin|Ga dulu
+    """
+    if not _is_admin(message.from_user.id):
+        return
+
+    raw = message.text.replace("/broadcastpoll", "", 1).strip()
+    if not raw or "|" not in raw:
+        return await message.answer(
+            "📋 <b>Format:</b>\n"
+            "/broadcastpoll PERTANYAAN|OPSI1|OPSI2|OPSI3\n\n"
+            "<b>Contoh:</b>\n"
+            "/broadcastpoll Kalo aku open PO Capcut 1B mau ga?|Mau banget|Mungkin|Ga dulu\n\n"
+            "💡 Minimal 2 opsi, maksimal 10 opsi. Pisahkan dengan |"
+        )
+
+    parts = [p.strip() for p in raw.split("|")]
+    question = parts[0]
+    options = parts[1:]
+
+    if len(options) < 2:
+        return await message.answer("⚠️ Minimal 2 opsi jawaban.")
+    if len(options) > 10:
+        return await message.answer("⚠️ Maksimal 10 opsi jawaban.")
+
+    try:
+        from app.infrastructure.database.connection import get_pool
+        pool = get_pool()
+        if not pool:
+            return await message.answer("❌ Database tidak tersedia.")
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT telegram_id FROM users WHERE is_banned = FALSE AND telegram_id != $1",
+                message.from_user.id,
+            )
+
+        if not rows:
+            return await message.answer("⚠️ Tidak ada user di database.")
+
+        # Confirmation
+        options_preview = "\n".join(f"  • {o}" for o in options)
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✅ Kirim Poll", callback_data="broadcastpoll:confirm")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
+        kb.adjust(1)
+
+        await message.answer(
+            f"📊 <b>PREVIEW POLL</b>\n\n"
+            f"Pertanyaan: {question}\n"
+            f"Opsi:\n{options_preview}\n\n"
+            f"Target: {len(rows)} user\n"
+            f"Yakin kirim?",
+            reply_markup=kb.as_markup(),
+        )
+
+        _pending_polls[message.from_user.id] = {
+            "question": question,
+            "options": options,
+            "rows": rows,
+        }
+
+    except Exception as e:
+        await message.answer(f"❌ Error: {e}")
+
+
+_pending_polls: dict = {}
+
+# Poll tracking: aggregate votes from all users
+_active_polls: dict = {}       # poll_track_id → {question, options, votes, voters, ...}
+_poll_id_map: dict = {}        # telegram_poll_id → poll_track_id
+
+
+@router.callback_query(F.data == "broadcastpoll:confirm")
+async def handle_broadcastpoll_confirm(callback: CallbackQuery):
+    """Execute broadcast poll after confirmation."""
+    if not _is_admin(callback.from_user.id):
+        return await callback.answer("⛔", show_alert=True)
+
+    data = _pending_polls.pop(callback.from_user.id, None)
+    if not data:
+        await callback.message.edit_text("⚠️ Poll expired. Kirim ulang /broadcastpoll.")
+        return await callback.answer()
+
+    question = data["question"]
+    options = data["options"]
+    rows = data["rows"]
+
+    await callback.message.edit_text(f"📊 Mengirim poll ke {len(rows)} user...")
+    await callback.answer()
+
+    import asyncio
+    sent = 0
+    failed = 0
+
+    # Generate unique poll_id tracker
+    import time
+    poll_track_id = f"poll_{int(time.time())}"
+
+    # Store poll metadata for aggregation
+    _active_polls[poll_track_id] = {
+        "question": question,
+        "options": options,
+        "votes": {i: 0 for i in range(len(options))},
+        "voters": {},  # user_id → option_index
+        "total_sent": 0,
+        "admin_id": callback.from_user.id,
+        "telegram_poll_ids": [],  # track all poll IDs for matching
+    }
+
+    for row in rows:
+        try:
+            poll_msg = await callback.bot.send_poll(
+                chat_id=row['telegram_id'],
+                question=question,
+                options=options,
+                is_anonymous=False,  # Non-anonymous so we get poll_answer updates
+            )
+            # Map telegram poll_id to our tracker
+            if poll_msg.poll:
+                _poll_id_map[poll_msg.poll.id] = poll_track_id
+                _active_polls[poll_track_id]["telegram_poll_ids"].append(poll_msg.poll.id)
+            sent += 1
+        except Exception:
+            failed += 1
+
+        if sent % 25 == 0:
+            await asyncio.sleep(1.1)
+
+    _active_polls[poll_track_id]["total_sent"] = sent
+
+    await callback.message.edit_text(
+        f"📊 <b>POLL BROADCAST SELESAI</b>\n\n"
+        f"• Pertanyaan: {question}\n"
+        f"• Terkirim : {sent}\n"
+        f"• Gagal    : {failed}\n"
+        f"• Total    : {len(rows)}\n\n"
+        f"💡 Lihat hasil: /pollresult {poll_track_id}"
+    )
+    logger.info("[admin] Poll broadcast sent: %s/%s question=%s track=%s", sent, len(rows), question, poll_track_id)
+
+
+@router.poll_answer()
+async def handle_poll_answer(poll_answer):
+    """Track poll votes from users for aggregation."""
+    telegram_poll_id = poll_answer.poll_id
+    user_id = poll_answer.user.id
+
+    # Find our tracker for this poll
+    poll_track_id = _poll_id_map.get(telegram_poll_id)
+    if not poll_track_id or poll_track_id not in _active_polls:
+        return  # Not our tracked poll
+
+    poll_data = _active_polls[poll_track_id]
+
+    # Remove previous vote if user changed answer
+    if user_id in poll_data["voters"]:
+        old_option = poll_data["voters"][user_id]
+        poll_data["votes"][old_option] = max(0, poll_data["votes"][old_option] - 1)
+
+    # Record new vote (poll_answer.option_ids is a list of selected options)
+    if poll_answer.option_ids:
+        option_idx = poll_answer.option_ids[0]  # Single-choice poll
+        poll_data["votes"][option_idx] = poll_data["votes"].get(option_idx, 0) + 1
+        poll_data["voters"][user_id] = option_idx
+    else:
+        # User retracted vote
+        poll_data["voters"].pop(user_id, None)
+
+
+@router.message(Command("pollresult"))
+async def cmd_pollresult(message: Message):
+    """Lihat hasil poll. Usage: /pollresult [POLL_ID]
+
+    Tanpa ID: tampilkan poll terakhir.
+    """
+    if not _is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()
+
+    if len(args) >= 2:
+        poll_track_id = args[1]
+    else:
+        # Get latest poll
+        if not _active_polls:
+            return await message.answer("⚠️ Belum ada poll aktif.")
+        poll_track_id = list(_active_polls.keys())[-1]
+
+    poll_data = _active_polls.get(poll_track_id)
+    if not poll_data:
+        return await message.answer(f"⚠️ Poll {poll_track_id} tidak ditemukan.")
+
+    question = poll_data["question"]
+    options = poll_data["options"]
+    votes = poll_data["votes"]
+    total_votes = sum(votes.values())
+    total_sent = poll_data["total_sent"]
+
+    text = f"📊 <b>HASIL POLL</b>\n\n"
+    text += f"❓ {question}\n\n"
+
+    for i, option in enumerate(options):
+        count = votes.get(i, 0)
+        pct = round(count / total_votes * 100) if total_votes > 0 else 0
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        text += f"{option}\n{bar} {count} vote ({pct}%)\n\n"
+
+    text += (
+        f"Total vote: {total_votes} / {total_sent} user\n"
+        f"Response rate: {round(total_votes / total_sent * 100) if total_sent > 0 else 0}%\n\n"
+        f"ID: {poll_track_id}"
+    )
+
+    await message.answer(text)
+
+
 # ======================================================================
 # ANALYTICS & REPORTING COMMANDS
 # ======================================================================
