@@ -143,8 +143,10 @@ async def run_bot() -> None:
     # Inject bot ke webhook handler untuk notifikasi
     from app.presentation.web.callbacks import set_bot
     from app.presentation.web.pakasir_callback import set_bot as set_bot_pakasir
+    from app.presentation.web.gopay_callback import set_bot as set_bot_gopay
     set_bot(bot)
     set_bot_pakasir(bot)
+    set_bot_gopay(bot)
 
     # Register bot commands (different for admin vs user)
     await _register_commands(bot)
@@ -165,6 +167,10 @@ async def run_webhook_server() -> None:
 
     # Register Pakasir webhook endpoint on same FastAPI app
     webhook_app.post("/webhook/pakasir")(pakasir_webhook)
+
+    # Register GoPay MacroDroid webhook
+    from app.presentation.web.gopay_callback import router as gopay_router
+    webhook_app.include_router(gopay_router)
 
     config = uvicorn.Config(
         webhook_app,

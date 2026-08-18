@@ -10,11 +10,14 @@ def get_product_detail_keyboard(product_id: int, qty: int) -> InlineKeyboardMark
     builder.button(text=f"🔢 {qty}", callback_data="qty:noop")
     builder.button(text="➕", callback_data=f"qty:plus:{product_id}:{qty}")
     
-    # Baris 2: Metode Pembayaran
+    # Baris 2: Metode Pembayaran (Saldo & QRIS via provider aktif)
     builder.button(text="💳 Buy ( Saldo )", callback_data=f"checkout:saldo:{product_id}:{qty}")
     builder.button(text="⚡ Buy ( Now )", callback_data=f"checkout:now:{product_id}:{qty}")
     
-    builder.adjust(3, 2)
+    # Baris 3: GoPay QRIS (No Fee — via MacroDroid)
+    builder.button(text="🟢 GoPay QRIS (No Fee)", callback_data=f"checkout:gopay:{product_id}:{qty}")
+    
+    builder.adjust(3, 2, 1)
     return builder.as_markup()
 
 # Gambar 2 & 3: Keyboard Opsi Catatan

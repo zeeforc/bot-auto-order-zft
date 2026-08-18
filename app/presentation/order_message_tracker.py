@@ -26,14 +26,14 @@ def track(order_id: str, chat_id: int, message_ids: List[int]) -> None:
     """Daftarkan pesan flow yang harus dihapus saat order PAID."""
     if not order_id or not message_ids:
         return
-    _tracker[order_id] = (int(chat_id), [int(m) for m in message_ids if m])
+    _tracker[str(order_id)] = (int(chat_id), [int(m) for m in message_ids if m])
 
 
 def pop(order_id: str) -> Tuple[int, List[int]] | None:
     """Ambil & hapus tracking untuk order_id (dipanggil saat webhook PAID)."""
-    return _tracker.pop(order_id, None)
+    return _tracker.pop(str(order_id), None)
 
 
 def clear(order_id: str) -> None:
     """Hapus tracking untuk order_id (dipanggil saat order cancelled/expired)."""
-    _tracker.pop(order_id, None)
+    _tracker.pop(str(order_id), None)

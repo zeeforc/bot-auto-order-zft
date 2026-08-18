@@ -15,16 +15,26 @@ from app.presentation.telegram.handlers.start import format_product_list, _total
 from app.presentation.telegram.keyboards.inline import get_pagination_keyboard
 from app.presentation.telegram.keyboards.order import get_product_detail_keyboard
 from app.presentation.telegram.states import OrderStates
-from app.infrastructure.database.factory import get_product_repository
+from app.infrastructure.database.factory import get_product_repository, get_user_repository
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+async def _sync_username(user_id: int, username: str | None) -> None:
+    """Sinkronisasi username Telegram ke DB jika berubah. Fire-and-forget."""
+    try:
+        user_repo = await get_user_repository()
+        await user_repo.get_or_create(user_id, username=username)
+    except Exception as e:
+        logger.debug("[menu] Failed to sync username for %s: %s", user_id, e)
 
 
 # --- 1. Tombol "📋 List Produk" ---
 @router.message(F.text == "📋 List Produk")
 async def menu_list_produk(message: Message):
     logger.info("[menu] List Produk pressed by user_id=%s", message.from_user.id)
+    await _sync_username(message.from_user.id, message.from_user.username)
     tp = await _total_pages()
     await message.answer(
         text=await format_product_list(page=1),
@@ -185,6 +195,7 @@ async def handle_product_number(message: Message, state: FSMContext):
     """
     seq_number = int(message.text)
     logger.info("[menu] Product number %s pressed by user_id=%s", seq_number, message.from_user.id)
+    await _sync_username(message.from_user.id, message.from_user.username)
 
     # Resolve sequential number → actual product
     # Nomor 1 = produk pertama sorted by name ASC

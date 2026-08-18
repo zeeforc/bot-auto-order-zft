@@ -680,6 +680,174 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
             flow_ids.append(qris_msg.message_id)
             _track_msgs(result.order.id, callback.message.chat.id, flow_ids)
 
+    # CASE 3: BAYAR VIA GOPAY QRIS (No Fee — MacroDroid)
+    elif method == "gopay":
+        # Calculate base total
+        price = product_data["price"]
+        wholesale = product_data.get("wholesale", int(price * 0.9))
+        price_per_item = wholesale if qty >= 200 else price
+        base_cost = price_per_item * qty
+
+        # Apply voucher discount
+        if _voucher_discount > 0:
+            base_cost = max(0, base_cost - _voucher_discount)
+
+        # Minimum amount check
+        if base_cost < 100:
+            await callback.message.answer(
+                f"⚠️ Total terlalu kecil (Rp {base_cost:,}).\n"
+                f"Minimal transaksi GoPay QRIS: Rp 100."
+            )
+            await callback.answer()
+            return
+
+        # Generate unique amount (anti-collision)
+        try:
+            final_amount = await order_service.generate_unique_amount(base_cost)
+        except Exception as e:
+            logger.error("[order] GoPay unique amount error: %s", e)
+            await callback.message.answer(
+                "❌ Gagal generate nominal unik. Coba lagi nanti."
+            )
+            await callback.answer()
+            return
+
+        unique_code = final_amount - base_cost
+
+        # Execute order (status = pending, payment_method = gopay)
+        result = await order_service.execute_order(
+            user_id=callback.from_user.id,
+            product_id=product_id,
+            quantity=qty,
+            payment_method="gopay",
+            variant_id=product_data.get("variant_id"),
+            unit_price=price_per_item,
+        )
+
+        if not result.success:
+            await callback.message.answer(
+                f"❌ <b>Gagal memproses order</b>\n\n{result.error_message}"
+            )
+            await callback.answer()
+            return
+
+        # Override total_price di DB dengan final_amount (termasuk kode unik)
+        try:
+            from app.infrastructure.database.connection import get_pool
+            pool = get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE orders SET total_price = $1 WHERE id = $2",
+                        final_amount, result.order.id,
+                    )
+        except Exception as e:
+            logger.error("[order] Failed to update gopay amount: %s", e)
+
+        # Generate QRIS via GoPay provider
+        from app.infrastructure.payment.gopay_qris import GopayProvider, _generate_qr_bytes
+        gopay_static = settings.GOPAY_STATIC_QRIS
+
+        if gopay_static:
+            from app.infrastructure.payment.gopay_qris import _build_dynamic_qris
+            try:
+                qris_string = _build_dynamic_qris(gopay_static, final_amount)
+                qr_bytes = _generate_qr_bytes(qris_string)
+            except Exception as e:
+                logger.error("[order] GoPay QRIS generation error: %s", e)
+                await callback.message.answer(
+                    f"❌ Gagal generate QRIS GoPay.\n\nError: {e}\n\n"
+                    f"Pastikan GOPAY_STATIC_QRIS sudah diisi dengan benar di .env"
+                )
+                await callback.answer()
+                return
+        else:
+            await callback.message.answer(
+                "⚠️ GoPay QRIS belum di-configure.\n\n"
+                "Admin perlu mengisi GOPAY_STATIC_QRIS di .env terlebih dahulu."
+            )
+            await callback.answer()
+            return
+
+        # Format waktu
+        now = datetime.now()
+        expired_at = now + timedelta(seconds=QRIS_EXPIRE_SECONDS)
+        jam_str = now.strftime("%d %b %Y pukul %H:%M")
+        expired_str = expired_at.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Build caption — emphasize exact amount
+        caption_gopay = (
+            f"╭─────{{ ⏳ TRANSAKSI PENDING }}─────\n"
+            f"│\n"
+            f"│ • ID Payment  : <code>{result.order.id[:8]}</code>\n"
+            f"│ • Service     : 🟢 GoPay QRIS (No Fee)\n"
+            f"│ • Produk      : {product_data['name']}\n"
+            f"│ • Harga/Unit  : Rp {price_per_item:,}\n"
+            f"│ • Jumlah      : {qty}\n"
+        )
+        if _voucher_discount > 0:
+            caption_gopay += f"│ • Voucher     : {_voucher_code} (-Rp {_voucher_discount:,})\n"
+        caption_gopay += (
+            f"│ • Kode Unik   : +Rp {unique_code:,}\n"
+            f"│ • Fee         : Rp 0 (GRATIS)\n"
+            f"│ • Note        : {note}\n"
+            f"│ • <b>TOTAL BAYAR : Rp {final_amount:,}</b>\n"
+            f"│ • Jam/Tanggal : {jam_str}\n"
+            f"│ • Bayar sblm  : {expired_str}\n"
+            f"│\n"
+            f"│ ⚠️ <b>BAYAR HARUS PAS Rp {final_amount:,}</b>\n"
+            f"│ Jika nominal tidak tepat, pembayaran\n"
+            f"│ tidak terdeteksi otomatis!\n"
+            f"│\n"
+            f"╰──────────────────────────────────"
+        )
+
+        # Action buttons
+        cancel_kb = InlineKeyboardBuilder()
+        cancel_kb.button(text="🔄 Cek Pembayaran", callback_data=f"qris:check:{result.order.id}")
+        cancel_kb.button(text="❌ Batalkan Pembayaran", callback_data=f"qris:cancel:{result.order.id}")
+        cancel_kb.adjust(1)
+
+        try:
+            qr_photo = BufferedInputFile(qr_bytes, filename="gopay_qris.png")
+            qris_msg = await callback.message.answer_photo(
+                photo=qr_photo,
+                caption=caption_gopay,
+                reply_markup=cancel_kb.as_markup(),
+            )
+        except Exception as e:
+            logger.error("[order] Failed to send GoPay QRIS photo: %s", e)
+            qris_msg = await callback.message.answer(
+                text=caption_gopay,
+                reply_markup=cancel_kb.as_markup(),
+            )
+
+        # Track flow messages for cleanup
+        from app.presentation.order_message_tracker import track as _track_msgs
+        flow_ids = list(_cleanup_msg_ids)
+        if _cleanup_product_msg_id:
+            flow_ids.append(_cleanup_product_msg_id)
+        flow_ids.append(callback.message.message_id)
+        flow_ids.append(qris_msg.message_id)
+        _track_msgs(result.order.id, callback.message.chat.id, flow_ids)
+
+        # Apply voucher if applicable
+        if _voucher_id and _voucher_discount > 0:
+            try:
+                from app.application.services.factory import get_voucher_service
+                from app.presentation.telegram.handlers.voucher import clear_user_voucher
+                voucher_svc = await get_voucher_service()
+                await voucher_svc.apply_voucher(_voucher_id, callback.from_user.id, result.order.id)
+                clear_user_voucher(callback.from_user.id)
+                logger.info("[order] Voucher applied (GoPay): code=%s discount=%s", _voucher_code, _voucher_discount)
+            except Exception as e:
+                logger.error("[order] Failed to apply voucher (GoPay): %s", e)
+
+        # Schedule auto-expire after 15 minutes
+        asyncio.create_task(
+            _auto_expire_qris(callback.bot, qris_msg, result.order.id)
+        )
+
     await callback.answer()
 
 
@@ -715,6 +883,79 @@ async def cancel_order(callback: CallbackQuery, state: FSMContext):
         text="❌ Transaksi telah dibatalkan.",
     )
     await callback.answer()
+
+
+# --- CHECK QRIS PAYMENT ---
+@router.callback_query(F.data.startswith("qris:check:"))
+async def check_qris_payment(callback: CallbackQuery):
+    """Cek pembayaran secara manual ke GoBiz Web API."""
+    order_id = callback.data.split(":", 2)[2]
+    
+    try:
+        from app.infrastructure.database.factory import get_order_repository
+        from app.infrastructure.payment.factory import get_active_provider
+        
+        order_repo = await get_order_repository()
+        order = await order_repo.get_by_id(order_id)
+        
+        if not order:
+            await callback.answer("Order tidak ditemukan.", show_alert=True)
+            return
+            
+        if order.status != "pending":
+            await callback.answer(f"Order sudah {order.status}.", show_alert=True)
+            return
+
+        provider = get_active_provider()
+        if not hasattr(provider, "check_payment_status"):
+            await callback.answer("Fitur cek otomatis tidak didukung oleh metode ini.", show_alert=True)
+            return
+            
+        # Cek ke GoBiz Web API
+        # Nominal total yang harus dibayar ada di order.total_price
+        is_paid = await provider.check_payment_status(
+            amount=order.total_price, 
+            created_after=order.created_at
+        )
+        
+        if is_paid:
+            # Jika dibayar, kita jalankan logic success seperti di webhook
+            from app.application.services.factory import get_order_service
+            order_svc = await get_order_service()
+            
+            # Kita panggil proses sukses via gopay webhook khusus
+            # Karena logic gopay webhook butuh amount untuk pencarian, kita sediakan
+            # Tapi karena kita sudah tahu order_id, kita langsung update status & kirim akun
+            
+            success_order = await order_svc.process_gopay_webhook(order.total_price)
+            if success_order:
+                await callback.answer("✅ Pembayaran berhasil terverifikasi!", show_alert=True)
+                # Cleanup messages
+                try:
+                    from app.presentation.order_message_tracker import pop as _pop_track
+                    tracked = _pop_track(str(order_id))
+                    if tracked:
+                        chat_id_track, msg_ids_track = tracked
+                        for mid in msg_ids_track:
+                            try:
+                                await callback.bot.delete_message(chat_id=chat_id_track, message_id=mid)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                
+                # Kirim notifikasi sukses via send_gopay_success_notification
+                from app.presentation.web.gopay_callback import send_gopay_success_notification
+                await send_gopay_success_notification(success_order)
+                return
+            else:
+                await callback.answer("Gagal memproses penyelesaian order.", show_alert=True)
+        else:
+            await callback.answer("❌ Pembayaran belum masuk. Tunggu sebentar dan coba lagi.", show_alert=True)
+            
+    except Exception as e:
+        logger.error("[order] Failed to check order %s: %s", order_id, e)
+        await callback.answer("Terjadi kesalahan saat mengecek.", show_alert=True)
 
 
 # --- CANCEL QRIS PAYMENT ---

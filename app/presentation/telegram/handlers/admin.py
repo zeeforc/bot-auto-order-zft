@@ -17,6 +17,7 @@ from app.presentation.telegram.states import (
     AddStockStates,
     EditVariantStates,
     DelVariantStates,
+    DelAllStockStates,
 )
 
 logger = logging.getLogger(__name__)
@@ -795,7 +796,7 @@ async def _apply_edit(message: Message, state: FSMContext, value, edit_msg: bool
 
         kb = InlineKeyboardBuilder()
         kb.button(text="🔙 Kembali ke Produk", callback_data=f"editproduct:back:{product_id}")
-        kb.button(text="🔙 Kembali", callback_data="admin:cancel")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
         kb.adjust(1)
 
         text = (
@@ -1088,7 +1089,7 @@ async def cmd_addstock(message: Message, state: FSMContext):
         kb = InlineKeyboardBuilder()
         for v in variants:
             kb.button(text=f"{v['name']} (stok: {v['stock']})", callback_data=f"addstock:var:{v['id']}")
-        kb.button(text="🔙 Kembali", callback_data="admin:cancel")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
         kb.adjust(1)
 
         await message.answer(
@@ -1231,7 +1232,7 @@ async def addstock_receive_accounts(message: Message, state: FSMContext):
         # Back button → kembali ke pilih variant
         kb = InlineKeyboardBuilder()
         kb.button(text="🔙 Kembali ke Variant", callback_data=f"addstock:back:{product_id}")
-        kb.button(text="🔙 Kembali", callback_data="admin:cancel")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
         kb.adjust(1)
 
         await message.answer(
@@ -1279,7 +1280,7 @@ async def addstock_back(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     for v in variants:
         kb.button(text=f"{v['name']} (stok: {v['stock']})", callback_data=f"addstock:var:{v['id']}")
-    kb.button(text="🔙 Kembali", callback_data="admin:cancel")
+    kb.button(text="❌ Batal", callback_data="admin:cancel")
     kb.adjust(1)
 
     await callback.message.answer(
@@ -2627,7 +2628,7 @@ async def cmd_editvariant(message: Message, state: FSMContext):
                 text=f"{v['name']} (Rp {v['price']:,} | stok {v['stock']})",
                 callback_data=f"editvariant:select:{v['id']}",
             )
-        kb.button(text="🔙 Kembali", callback_data="admin:cancel")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
         kb.adjust(1)
 
         await message.answer(
@@ -2673,8 +2674,6 @@ async def editvariant_selected(callback: CallbackQuery, state: FSMContext):
         kb.button(text=f.title(), callback_data=f"editvariant:field:{f}")
     if parent_product_id:
         kb.button(text="🔙 Kembali", callback_data=f"editvariant:back_to_select:{parent_product_id}")
-    else:
-        kb.button(text="🔙 Kembali", callback_data="admin:cancel")
     kb.button(text="❌ Batal", callback_data="admin:cancel")
     kb.adjust(2, 2, 2, 2)
 
@@ -2766,7 +2765,7 @@ async def editvariant_value(message: Message, state: FSMContext):
         # Back button → kembali ke field selection
         kb = InlineKeyboardBuilder()
         kb.button(text="🔙 Kembali ke Variant", callback_data=f"editvariant:back:{variant_id}")
-        kb.button(text="🔙 Kembali", callback_data="admin:cancel")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
         kb.adjust(1)
 
         await message.answer(
@@ -2818,8 +2817,6 @@ async def editvariant_back(callback: CallbackQuery, state: FSMContext):
         kb.button(text=f.title(), callback_data=f"editvariant:field:{f}")
     if parent_product_id:
         kb.button(text="🔙 Kembali", callback_data=f"editvariant:back_to_select:{parent_product_id}")
-    else:
-        kb.button(text="🔙 Kembali", callback_data="admin:cancel")
     kb.button(text="❌ Batal", callback_data="admin:cancel")
     kb.adjust(2, 2, 2, 2)
 
@@ -2885,7 +2882,7 @@ async def cmd_delvariant(message: Message, state: FSMContext):
         kb = InlineKeyboardBuilder()
         for v in variants:
             kb.button(text=f"{v['name']} (stok {v['stock']})", callback_data=f"delvariant:select:{v['id']}")
-        kb.button(text="🔙 Kembali", callback_data="admin:cancel")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
         kb.adjust(1)
 
         await message.answer(
@@ -3060,7 +3057,6 @@ async def editvariant_back_to_select(callback: CallbackQuery, state: FSMContext)
             text=f"{v['name']} (Rp {v['price']:,} | stok {v['stock']})",
             callback_data=f"editvariant:select:{v['id']}",
         )
-    kb.button(text="🔙 Kembali", callback_data="admin:cancel")
     kb.button(text="❌ Batal", callback_data="admin:cancel")
     kb.adjust(1)
 
@@ -3535,3 +3531,285 @@ async def cmd_editstock(message: Message):
         logger.info("[admin] Stock edited: id=%s", stock_id)
     except Exception as e:
         await message.answer(f"❌ Error: {e}")
+
+
+# ======================================================================
+# /delallstock — Hapus semua stok variant (interaktif)
+# ======================================================================
+
+@router.message(Command("delallstock"))
+async def cmd_delallstock(message: Message, state: FSMContext):
+    """Hapus semua akun unused dari variant tertentu secara interaktif.
+
+    Flow: Pilih produk → Pilih variant → Konfirmasi → Hapus
+    """
+    if not _is_admin(message.from_user.id):
+        return
+
+    from app.infrastructure.database.connection import get_pool
+    pool = get_pool()
+    if not pool:
+        return await message.answer("❌ Database tidak tersedia.")
+
+    try:
+        async with pool.acquire() as conn:
+            products = await conn.fetch(
+                """SELECT id, name FROM products WHERE is_active = TRUE ORDER BY name ASC"""
+            )
+
+        if not products:
+            return await message.answer("⚠️ Tidak ada produk aktif di database.")
+
+        kb = InlineKeyboardBuilder()
+        for p in products:
+            kb.button(
+                text=f"[{p['id']}] {p['name']}",
+                callback_data=f"delallstock:prod:{p['id']}",
+            )
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
+        kb.adjust(1)
+
+        await state.set_state(DelAllStockStates.waiting_for_product_select)
+        await message.answer(
+            "🗑️ <b>HAPUS SEMUA STOK VARIANT</b>\n\n"
+            "Pilih <b>produk</b> yang variantnya ingin dikosongkan stoknya:",
+            reply_markup=kb.as_markup(),
+        )
+    except Exception as e:
+        await message.answer(f"❌ Error: {e}")
+
+
+@router.callback_query(DelAllStockStates.waiting_for_product_select, F.data.startswith("delallstock:prod:"))
+async def delallstock_product_selected(callback: CallbackQuery, state: FSMContext):
+    """Tampilkan daftar variant setelah produk dipilih."""
+    product_id = int(callback.data.split(":")[-1])
+
+    from app.infrastructure.database.connection import get_pool
+    pool = get_pool()
+
+    try:
+        async with pool.acquire() as conn:
+            product = await conn.fetchrow("SELECT id, name FROM products WHERE id = $1", product_id)
+            variants = await conn.fetch(
+                """SELECT id, name, stock FROM product_variants
+                   WHERE product_id = $1 AND is_active = TRUE
+                   ORDER BY name ASC""",
+                product_id,
+            )
+
+        if not product:
+            return await callback.answer("⚠️ Produk tidak ditemukan.", show_alert=True)
+
+        if not variants:
+            return await callback.answer("⚠️ Produk ini tidak punya variant aktif.", show_alert=True)
+
+        await state.update_data(delallstock_product_id=product_id, delallstock_product_name=product["name"])
+        await state.set_state(DelAllStockStates.waiting_for_variant_select)
+
+        kb = InlineKeyboardBuilder()
+        for v in variants:
+            kb.button(
+                text=f"{v['name']} (stok: {v['stock']})",
+                callback_data=f"delallstock:var:{v['id']}",
+            )
+        kb.button(text="🔙 Kembali", callback_data="delallstock:back_to_product")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
+        kb.adjust(1)
+
+        await callback.message.edit_text(
+            f"🗑️ <b>HAPUS SEMUA STOK VARIANT</b>\n\n"
+            f"Produk: <b>{product['name']}</b>\n\n"
+            f"Pilih <b>variant</b> yang stoknya ingin dikosongkan:",
+            reply_markup=kb.as_markup(),
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"❌ Error: {e}", show_alert=True)
+
+
+@router.callback_query(DelAllStockStates.waiting_for_variant_select, F.data == "delallstock:back_to_product")
+async def delallstock_back_to_product(callback: CallbackQuery, state: FSMContext):
+    """Kembali ke pilih produk."""
+    from app.infrastructure.database.connection import get_pool
+    pool = get_pool()
+
+    try:
+        async with pool.acquire() as conn:
+            products = await conn.fetch(
+                "SELECT id, name FROM products WHERE is_active = TRUE ORDER BY name ASC"
+            )
+
+        kb = InlineKeyboardBuilder()
+        for p in products:
+            kb.button(
+                text=f"[{p['id']}] {p['name']}",
+                callback_data=f"delallstock:prod:{p['id']}",
+            )
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
+        kb.adjust(1)
+
+        await state.set_state(DelAllStockStates.waiting_for_product_select)
+        await callback.message.edit_text(
+            "🗑️ <b>HAPUS SEMUA STOK VARIANT</b>\n\n"
+            "Pilih <b>produk</b> yang variantnya ingin dikosongkan stoknya:",
+            reply_markup=kb.as_markup(),
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"❌ Error: {e}", show_alert=True)
+
+
+@router.callback_query(DelAllStockStates.waiting_for_variant_select, F.data.startswith("delallstock:var:"))
+async def delallstock_variant_selected(callback: CallbackQuery, state: FSMContext):
+    """Tampilkan konfirmasi sebelum hapus."""
+    variant_id = int(callback.data.split(":")[-1])
+
+    from app.infrastructure.database.connection import get_pool
+    pool = get_pool()
+
+    try:
+        async with pool.acquire() as conn:
+            variant = await conn.fetchrow(
+                """SELECT v.id, v.name, v.stock, p.name as product_name
+                   FROM product_variants v
+                   JOIN products p ON p.id = v.product_id
+                   WHERE v.id = $1""",
+                variant_id,
+            )
+
+        if not variant:
+            return await callback.answer("⚠️ Variant tidak ditemukan.", show_alert=True)
+
+        data = await state.get_data()
+        await state.update_data(delallstock_variant_id=variant_id, delallstock_variant_name=variant["name"])
+        await state.set_state(DelAllStockStates.waiting_for_confirmation)
+
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✅ Ya, Hapus Semua", callback_data=f"delallstock:confirm:{variant_id}")
+        kb.button(text="🔙 Kembali", callback_data=f"delallstock:back_to_variant:{data.get('delallstock_product_id', 0)}")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
+        kb.adjust(1)
+
+        await callback.message.edit_text(
+            f"⚠️ <b>KONFIRMASI HAPUS STOK</b>\n\n"
+            f"Produk  : <b>{variant['product_name']}</b>\n"
+            f"Variant : <b>{variant['name']}</b>\n"
+            f"Stok    : <b>{variant['stock']} akun</b>\n\n"
+            f"<i>Semua akun <u>yang belum terpakai</u> di variant ini akan dihapus permanen.\n"
+            f"Akun yang sudah terkirim ke customer TIDAK akan dihapus.</i>\n\n"
+            f"Lanjutkan?",
+            reply_markup=kb.as_markup(),
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"❌ Error: {e}", show_alert=True)
+
+
+@router.callback_query(DelAllStockStates.waiting_for_confirmation, F.data.startswith("delallstock:back_to_variant:"))
+async def delallstock_back_to_variant(callback: CallbackQuery, state: FSMContext):
+    """Kembali ke pilih variant."""
+    product_id = int(callback.data.split(":")[-1])
+    data = await state.get_data()
+    product_name = data.get("delallstock_product_name", "")
+
+    from app.infrastructure.database.connection import get_pool
+    pool = get_pool()
+
+    try:
+        async with pool.acquire() as conn:
+            variants = await conn.fetch(
+                """SELECT id, name, stock FROM product_variants
+                   WHERE product_id = $1 AND is_active = TRUE ORDER BY name ASC""",
+                product_id,
+            )
+
+        await state.set_state(DelAllStockStates.waiting_for_variant_select)
+        kb = InlineKeyboardBuilder()
+        for v in variants:
+            kb.button(
+                text=f"{v['name']} (stok: {v['stock']})",
+                callback_data=f"delallstock:var:{v['id']}",
+            )
+        kb.button(text="🔙 Kembali", callback_data="delallstock:back_to_product")
+        kb.button(text="❌ Batal", callback_data="admin:cancel")
+        kb.adjust(1)
+
+        await callback.message.edit_text(
+            f"🗑️ <b>HAPUS SEMUA STOK VARIANT</b>\n\n"
+            f"Produk: <b>{product_name}</b>\n\n"
+            f"Pilih <b>variant</b> yang stoknya ingin dikosongkan:",
+            reply_markup=kb.as_markup(),
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"❌ Error: {e}", show_alert=True)
+
+
+@router.callback_query(DelAllStockStates.waiting_for_confirmation, F.data.startswith("delallstock:confirm:"))
+async def delallstock_confirm(callback: CallbackQuery, state: FSMContext):
+    """Eksekusi hapus semua stok unused di variant."""
+    variant_id = int(callback.data.split(":")[-1])
+
+    from app.infrastructure.database.connection import get_pool
+    pool = get_pool()
+
+    try:
+        async with pool.acquire() as conn:
+            # Ambil info variant dulu
+            variant = await conn.fetchrow(
+                """SELECT v.id, v.name, v.product_id, p.name as product_name
+                   FROM product_variants v
+                   JOIN products p ON p.id = v.product_id
+                   WHERE v.id = $1""",
+                variant_id,
+            )
+            if not variant:
+                await callback.answer("⚠️ Variant tidak ditemukan.", show_alert=True)
+                await state.clear()
+                return
+
+            # Hitung dulu berapa yang akan dihapus
+            count_before = await conn.fetchval(
+                "SELECT COUNT(*) FROM account_stock WHERE variant_id = $1 AND is_used = FALSE",
+                variant_id,
+            )
+
+            # Hapus semua akun unused
+            result = await conn.execute(
+                "DELETE FROM account_stock WHERE variant_id = $1 AND is_used = FALSE",
+                variant_id,
+            )
+
+            # Sync stock variant → 0
+            await conn.execute(
+                "UPDATE product_variants SET stock = 0 WHERE id = $1",
+                variant_id,
+            )
+
+            # Sync stock produk induk
+            await conn.execute(
+                """UPDATE products SET stock = COALESCE((
+                    SELECT SUM(stock) FROM product_variants
+                    WHERE product_id = $1 AND is_active = TRUE
+                ), 0) WHERE id = $1""",
+                variant["product_id"],
+            )
+
+        await state.clear()
+        await callback.message.edit_text(
+            f"✅ <b>STOK BERHASIL DIHAPUS</b>\n\n"
+            f"Produk  : <b>{variant['product_name']}</b>\n"
+            f"Variant : <b>{variant['name']}</b>\n"
+            f"Dihapus : <b>{count_before} akun</b>\n\n"
+            f"<i>Stok variant sekarang: 0</i>"
+        )
+        logger.info(
+            "[admin] delallstock: variant_id=%s deleted=%s accounts",
+            variant_id, count_before,
+        )
+        await callback.answer("✅ Stok berhasil dihapus!")
+    except Exception as e:
+        logger.error("[admin] delallstock error: %s", e)
+        await callback.answer(f"❌ Error: {e}", show_alert=True)
+        await state.clear()
+

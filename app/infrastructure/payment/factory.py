@@ -2,7 +2,8 @@
 Payment Provider Factory.
 
 Berdasarkan PAYMENT_PROVIDER di .env, return provider yang aktif.
-Supported: "tripay", "pakasir"
+Supported: "tripay", "pakasir", "gopay"
+Supported: "tripay", "pakasir", "gopay", "gopay_web"
 """
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ from typing import Optional
 
 from config import settings
 from .base import PaymentProvider
+from .pakasir import PakasirProvider
+from .gopay_web import GoPayWebProvider
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,10 @@ def get_active_provider() -> Optional[PaymentProvider]:
         _provider = _init_pakasir()
     elif provider_name == "tripay":
         _provider = _init_tripay()
+    elif provider_name == "gopay":
+        _provider = _init_gopay()
+    elif provider_name == "gopay_web":
+        _provider = GoPayWebProvider()
     else:
         logger.error("[payment] Unknown PAYMENT_PROVIDER: %s", provider_name)
         return None
@@ -79,3 +86,21 @@ def _init_tripay() -> Optional[PaymentProvider]:
     adapter = TripayAdapter(tripay)
     logger.info("[payment] ✅ TripayAdapter initialized")
     return adapter
+
+
+def _init_gopay() -> Optional[PaymentProvider]:
+    """Initialize GoPay Custom QRIS provider (local EMVCo generation)."""
+    static_qris = getattr(settings, "GOPAY_STATIC_QRIS", "")
+
+    if not static_qris:
+        logger.warning(
+            "[payment] GoPay belum di-configure (GOPAY_STATIC_QRIS kosong). "
+            "Isi dengan full EMVCo string dari QRIS statis merchant GoPay."
+        )
+        return None
+
+    from .gopay_qris import GopayProvider
+    provider = GopayProvider(static_qris=static_qris)
+    logger.info("[payment] ✅ GopayProvider initialized (qris_len=%s)", len(static_qris))
+    return provider
+

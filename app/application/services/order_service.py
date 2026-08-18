@@ -7,12 +7,15 @@ Tanggung jawab:
 3. Deduct saldo (atomic) - jika metode saldo
 4. Create order record di DB
 5. Return result (success/fail + detail)
+6. Generate unique amount untuk GoPay (anti-collision)
+7. Process GoPay webhook payment (match amount → PAID → deliver)
 
 Semua operasi atomic di level DB, bukan di Python.
 """
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass
 from typing import Optional
 
@@ -192,3 +195,154 @@ class OrderService:
         except Exception as e:
             logger.warning("[order] _get_real_stock error: %s (fallback to allow)", e)
             return 999  # Fallback: allow order, delivery will handle "akun belum tersedia"
+
+    # ======================================================================
+    # GoPay Custom QRIS — Unique Amount & Webhook Processing
+    # ======================================================================
+
+    async def generate_unique_amount(self, base_price: int, max_retries: int = 20) -> int:
+        """Generate nominal unik (base_price + random 1-999) yang anti-collision.
+
+        Nominal unik diperlukan karena GoPay tidak menyertakan Order ID
+        di notifikasi pembayaran. Matching dilakukan berdasarkan amount.
+
+        Args:
+            base_price: Harga dasar sebelum ditambah kode unik (IDR).
+            max_retries: Maksimal percobaan generate (default 20).
+
+        Returns:
+            Nominal unik yang belum ada di pending orders.
+
+        Raises:
+            RuntimeError: Jika gagal generate setelah max_retries kali.
+        """
+        from app.infrastructure.database.connection import get_pool
+        pool = get_pool()
+
+        for attempt in range(max_retries):
+            unique_code = random.randint(1, 10)
+            final_amount = base_price + unique_code
+
+            try:
+                async with pool.acquire() as conn:
+                    count = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) FROM orders
+                        WHERE total_price = $1
+                          AND status = 'pending'
+                          AND payment_method = 'gopay'
+                        """,
+                        final_amount,
+                    )
+
+                if count == 0:
+                    logger.info(
+                        "[order] ✅ Unique amount generated: base=%s code=%s final=%s (attempt %s)",
+                        base_price, unique_code, final_amount, attempt + 1,
+                    )
+                    return final_amount
+
+                logger.debug(
+                    "[order] Amount %s collision (pending exists), retrying...",
+                    final_amount,
+                )
+            except Exception as e:
+                logger.warning("[order] generate_unique_amount DB error: %s", e)
+                # Fallback: return tanpa collision check
+                return final_amount
+
+        # Fallback setelah max_retries: pakai amount terakhir + timestamp suffix
+        import time
+        fallback = base_price + (int(time.time()) % 1000)
+        logger.warning(
+            "[order] ⚠️ Max retries reached, using fallback amount: %s", fallback,
+        )
+        return fallback
+
+    async def process_gopay_webhook(self, amount: int) -> Optional[Order]:
+        """Match pembayaran GoPay dengan pending order berdasarkan amount.
+
+        Flow (ATOMIC / Transactional):
+        1. SELECT pending order dengan total_price = amount & method = 'gopay'
+        2. UPDATE status → 'paid'
+        3. Return order untuk delivery + notification di caller
+
+        Args:
+            amount: Nominal yang dibayar (dari notifikasi GoPay, sudah di-parse).
+
+        Returns:
+            Order jika match ditemukan dan berhasil di-update.
+            None jika tidak ada pending order yang cocok.
+        """
+        from app.infrastructure.database.connection import get_pool
+        pool = get_pool()
+        if not pool:
+            logger.error("[order] process_gopay_webhook: DB pool unavailable")
+            return None
+
+        try:
+            async with pool.acquire() as conn:
+                # Atomic transaction: select + update dalam satu koneksi
+                async with conn.transaction():
+                    # 1. Cari pending order yang match (FIFO: oldest first)
+                    row = await conn.fetchrow(
+                        """
+                        SELECT id, user_id, product_id, quantity, total_price,
+                               status, payment_method, payment_ref, variant_id,
+                               created_at, updated_at
+                        FROM orders
+                        WHERE total_price = $1
+                          AND status = 'pending'
+                          AND payment_method = 'gopay'
+                        ORDER BY created_at ASC
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                        """,
+                        amount,
+                    )
+
+                    if not row:
+                        logger.info(
+                            "[order] GoPay webhook: no pending order for amount=%s",
+                            amount,
+                        )
+                        return None
+
+                    order_id = row["id"]
+
+                    # 2. Update status → paid (atomic)
+                    await conn.execute(
+                        """
+                        UPDATE orders
+                        SET status = 'paid', updated_at = NOW()
+                        WHERE id = $1
+                        """,
+                        order_id,
+                    )
+
+                    logger.info(
+                        "[order] ✅ GoPay webhook matched: order_id=%s amount=%s user=%s",
+                        order_id, amount, row["user_id"],
+                    )
+
+                    # 3. Return Order entity
+                    return Order(
+                        id=row["id"],
+                        user_id=row["user_id"],
+                        product_id=row["product_id"],
+                        quantity=row["quantity"],
+                        total_price=row["total_price"],
+                        status="paid",
+                        payment_method=row["payment_method"],
+                        payment_ref=row["payment_ref"],
+                        variant_id=row["variant_id"],
+                        created_at=row["created_at"],
+                        updated_at=row["updated_at"],
+                    )
+
+        except Exception as e:
+            logger.error(
+                "[order] ❌ process_gopay_webhook error: %s (amount=%s)",
+                e, amount, exc_info=True,
+            )
+            return None

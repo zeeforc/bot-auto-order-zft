@@ -47,6 +47,14 @@ WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
 # Store Contact (untuk pesan delivery/support)
 STORE_CONTACT = os.getenv("STORE_CONTACT", "@zoroaze")
 
+# GoPay Custom QRIS (MacroDroid Mode)
+GOPAY_STATIC_QRIS = os.getenv("GOPAY_STATIC_QRIS", "")
+GOPAY_WEBHOOK_SECRET = os.getenv("GOPAY_WEBHOOK_SECRET", "")
+
+# GoBiz Web API (Polling Mode — tanpa MacroDroid)
+GOBIZ_API_URL = os.getenv("GOBIZ_API_URL", "")
+GOBIZ_AUTHORIZATION = os.getenv("GOBIZ_AUTHORIZATION", "")
+GOBIZ_COOKIE = os.getenv("GOBIZ_COOKIE", "")
 
 if not BOT_TOKEN:
     raise ValueError("Token Telegram bot tidak ditemukan! Pastikan sudah di-set di file .env")

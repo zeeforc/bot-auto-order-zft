@@ -73,3 +73,10 @@ class DelVariantStates(StatesGroup):
 class RefundRejectStates(StatesGroup):
     """FSM untuk admin reject refund (input alasan)."""
     waiting_for_reason = State()
+
+
+class DelAllStockStates(StatesGroup):
+    """FSM untuk /delallstock - hapus semua stok di variant tertentu."""
+    waiting_for_product_select = State()
+    waiting_for_variant_select = State()
+    waiting_for_confirmation = State()
