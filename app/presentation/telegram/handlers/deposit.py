@@ -174,8 +174,10 @@ async def confirm_deposit(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # Format waktu
-    now = datetime.now()
+    # Format waktu ke WIB (UTC+7)
+    from datetime import timezone, timedelta
+    wib = timezone(timedelta(hours=7))
+    now = datetime.now(wib)
     jam_str = now.strftime("%d %b %Y pukul %H:%M")
 
     # Tampilkan payment details

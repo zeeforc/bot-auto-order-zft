@@ -771,8 +771,10 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
 
-        # Format waktu
-        now = datetime.now()
+        # Format waktu ke WIB (UTC+7)
+        from datetime import timezone
+        wib = timezone(timedelta(hours=7))
+        now = datetime.now(wib)
         expired_at = now + timedelta(seconds=QRIS_EXPIRE_SECONDS)
         jam_str = now.strftime("%d %b %Y pukul %H:%M")
         expired_str = expired_at.strftime("%Y-%m-%d %H:%M:%S")
