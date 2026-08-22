@@ -78,8 +78,11 @@ class GoPayWebProvider(PaymentProvider):
             logger.error("[gopay-web] GOPAY_GATEWAY_API_KEY tidak diset.")
             return False
 
+        # Generate unique trx_id based on amount and time to prevent gateway cache collisions
+        trx_id = f"TRX-{amount}-{int(created_after.timestamp())}"
+
         # Build url for nodejs gateway
-        url = f"{self.gateway_url}/check-payment?amount={amount}&api_key={self.gateway_api_key}"
+        url = f"{self.gateway_url}/check-payment?amount={amount}&trx_id={trx_id}&api_key={self.gateway_api_key}"
         logger.debug("[gopay-web] Requesting Gateway: %s", url)
 
         try:
@@ -87,6 +90,7 @@ class GoPayWebProvider(PaymentProvider):
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as response:
                     text = await response.text()
                     if response.status != 200:
+                        text = await response.text()
                         logger.error("[gopay-web] Gateway Error: %s - %s", response.status, text[:200])
                         return False
 
