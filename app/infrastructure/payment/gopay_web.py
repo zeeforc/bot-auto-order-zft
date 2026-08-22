@@ -85,12 +85,18 @@ class GoPayWebProvider(PaymentProvider):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    text = await response.text()
                     if response.status != 200:
-                        text = await response.text()
                         logger.error("[gopay-web] Gateway Error: %s - %s", response.status, text[:200])
                         return False
 
-                    data = await response.json()
+                    try:
+                        data = await response.json()
+                    except:
+                        logger.error("[gopay-web] Gateway returned invalid JSON: %s", text)
+                        return False
+                    
+                    logger.info("[gopay-web] Gateway Response: %s", data)
                     
                     if data.get("success") and data.get("paid"):
                         logger.info("[gopay-web] ✅ Transaksi cocok (via gateway)! Amount: %s", amount)
