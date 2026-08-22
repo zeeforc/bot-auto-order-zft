@@ -78,11 +78,15 @@ class GoPayWebProvider(PaymentProvider):
             logger.error("[gopay-web] GOPAY_GATEWAY_API_KEY tidak diset.")
             return False
 
+        # Gateway Node.js membandingkan targetAmount dengan tx.gross_amount dari Gojek (yang dalam sen)
+        # Jadi kita harus mengirimkan amount * 100 (misal Rp 1.002 -> 100200)
+        gateway_amount = amount * 100
+
         # Generate unique trx_id based on amount and time to prevent gateway cache collisions
         trx_id = f"TRX-{amount}-{int(created_after.timestamp())}"
 
         # Build url for nodejs gateway
-        url = f"{self.gateway_url}/check-payment?amount={amount}&trx_id={trx_id}&api_key={self.gateway_api_key}"
+        url = f"{self.gateway_url}/check-payment?amount={gateway_amount}&trx_id={trx_id}&api_key={self.gateway_api_key}"
         logger.debug("[gopay-web] Requesting Gateway: %s", url)
 
         try:
