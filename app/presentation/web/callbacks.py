@@ -346,6 +346,8 @@ async def _handle_order_callback(
             now = dt.now().strftime("%d/%m/%Y %H:%M")
 
             for admin_id in ADMIN_IDS:
+                if str(admin_id) == str(order.user_id):
+                    continue
                 try:
                     admin_text = (
                         f"🔔 <b>ORDER PAID</b>\n\n"

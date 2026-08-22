@@ -54,6 +54,8 @@ async def _notify_admin_new_order(
         text += f"\n📦 Akun terkirim:\n{delivered_accounts}\n"
 
     for admin_id in ADMIN_IDS:
+        if str(admin_id) == str(user.id):
+            continue
         try:
             await bot.send_message(chat_id=admin_id, text=text, parse_mode="HTML")
         except Exception as e:

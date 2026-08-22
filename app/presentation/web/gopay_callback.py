@@ -247,6 +247,9 @@ async def send_gopay_success_notification(order) -> None:
                 admin_text += "\nAkun belum tersedia. Kirim manual ke user."
 
             for admin_id in ADMIN_IDS:
+                if str(admin_id) == str(order.user_id):
+                    # Skip sending admin notif if the admin is the one who bought it (to prevent double messages)
+                    continue
                 try:
                     await _bot.send_message(chat_id=admin_id, text=admin_text, parse_mode="HTML")
                 except Exception as e:
