@@ -51,10 +51,10 @@ STORE_CONTACT = os.getenv("STORE_CONTACT", "@zoroaze")
 GOPAY_STATIC_QRIS = os.getenv("GOPAY_STATIC_QRIS", "")
 GOPAY_WEBHOOK_SECRET = os.getenv("GOPAY_WEBHOOK_SECRET", "")
 
-# GoBiz Web API (Polling Mode — tanpa MacroDroid)
+# GoBiz Web API / GoPay Gateway (Auto-Refresh Mode)
 GOBIZ_API_URL = os.getenv("GOBIZ_API_URL", "")
-GOBIZ_AUTHORIZATION = os.getenv("GOBIZ_AUTHORIZATION", "")
-GOBIZ_COOKIE = os.getenv("GOBIZ_COOKIE", "")
+GOPAY_GATEWAY_URL = os.getenv("GOPAY_GATEWAY_URL", "http://127.0.0.1:3000")
+GOPAY_GATEWAY_API_KEY = os.getenv("GOPAY_GATEWAY_API_KEY", "")
 
 if not BOT_TOKEN:
     raise ValueError("Token Telegram bot tidak ditemukan! Pastikan sudah di-set di file .env")
