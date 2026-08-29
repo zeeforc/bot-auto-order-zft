@@ -20,6 +20,33 @@ logger = logging.getLogger(__name__)
 _provider: Optional[PaymentProvider] = None
 
 
+def get_active_provider_name() -> str:
+    """Get the name of the currently active provider."""
+    # Use global variable if set, otherwise fallback to settings
+    return getattr(settings, "_RUNTIME_PAYMENT_PROVIDER", getattr(settings, "PAYMENT_PROVIDER", "tripay")).lower()
+
+def set_active_provider(name: str):
+    """Set the active payment provider at runtime and save to .env."""
+    global _provider
+    # 1. Update in-memory setting so it applies immediately
+    setattr(settings, "_RUNTIME_PAYMENT_PROVIDER", name)
+    # 2. Reset the cached singleton provider so it's re-initialized
+    _provider = None
+    
+    # 3. Write to .env to persist across restarts
+    try:
+        import dotenv
+        from pathlib import Path
+        
+        env_path = Path(".env")
+        if env_path.exists():
+            dotenv.set_key(env_path, "PAYMENT_PROVIDER", name)
+            logger.info("[payment] ✅ PAYMENT_PROVIDER updated to '%s' in .env", name)
+        else:
+            logger.warning("[payment] .env file not found, runtime setting applied only.")
+    except Exception as e:
+        logger.error("[payment] Failed to write to .env: %s", e)
+
 def get_active_provider() -> Optional[PaymentProvider]:
     """Get singleton payment provider berdasarkan config.
 
@@ -31,7 +58,7 @@ def get_active_provider() -> Optional[PaymentProvider]:
     if _provider is not None:
         return _provider
 
-    provider_name = getattr(settings, "PAYMENT_PROVIDER", "tripay").lower()
+    provider_name = get_active_provider_name()
 
     if provider_name == "pakasir":
         _provider = _init_pakasir()

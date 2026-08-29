@@ -302,7 +302,18 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
         return await callback.answer("⚠️ Data produk tidak ditemukan.", show_alert=True)
 
     product_id = data["product_id"]
-    method = data["method"]
+    method_raw = data["method"]
+    
+    # Resolve dynamic QRIS method based on active provider
+    if method_raw == "qris":
+        from app.infrastructure.payment.factory import get_active_provider_name
+        provider_name = get_active_provider_name()
+        if provider_name == "gopay_web":
+            method = "gopay"
+        else:
+            method = "now"
+    else:
+        method = method_raw
     qty = data["qty"]
     note = data.get("note", "Tanpa catatan")
     # Voucher data from confirmation screen
@@ -705,18 +716,23 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
 
-        # Generate unique amount (anti-collision)
+        # Cek dan kunci nominal antrean
         try:
-            final_amount = await order_service.generate_unique_amount(base_cost)
+            lock_acquired = await order_service.acquire_payment_lock(base_cost, 15)
+            if not lock_acquired:
+                await callback.message.answer(
+                    f"⚠️ <b>ANTREAN PENUH</b>\n\n"
+                    f"Saat ini ada pembeli lain yang sedang transaksi dengan nominal pas <b>Rp {base_cost:,}</b>.\n"
+                    f"Mohon tunggu hingga 15 menit, atau ubah jumlah barang (qty) agar nominalnya berbeda."
+                )
+                await callback.answer()
+                return
         except Exception as e:
-            logger.error("[order] GoPay unique amount error: %s", e)
-            await callback.message.answer(
-                "❌ Gagal generate nominal unik. Coba lagi nanti."
-            )
-            await callback.answer()
+            logger.error("[order] Queue system error: %s", e)
+            await callback.answer("Terjadi kesalahan sistem antrean.")
             return
 
-        unique_code = final_amount - base_cost
+        final_amount = base_cost
 
         # Execute order (status = pending, payment_method = gopay)
         result = await order_service.execute_order(
@@ -729,24 +745,12 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
         )
 
         if not result.success:
+            order_service.release_payment_lock(final_amount)
             await callback.message.answer(
                 f"❌ <b>Gagal memproses order</b>\n\n{result.error_message}"
             )
             await callback.answer()
             return
-
-        # Override total_price di DB dengan final_amount (termasuk kode unik)
-        try:
-            from app.infrastructure.database.connection import get_pool
-            pool = get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE orders SET total_price = $1 WHERE id = $2",
-                        final_amount, result.order.id,
-                    )
-        except Exception as e:
-            logger.error("[order] Failed to update gopay amount: %s", e)
 
         # Generate QRIS via GoPay provider
         from app.infrastructure.payment.gopay_qris import GopayProvider, _generate_qr_bytes
@@ -794,7 +798,6 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
         if _voucher_discount > 0:
             caption_gopay += f"│ • Voucher     : {_voucher_code} (-Rp {_voucher_discount:,})\n"
         caption_gopay += (
-            f"│ • Kode Unik   : +Rp {unique_code:,}\n"
             f"│ • Fee         : Rp 0 (GRATIS)\n"
             f"│ • Note        : {note}\n"
             f"│ • <b>TOTAL BAYAR : Rp {final_amount:,}</b>\n"
@@ -810,7 +813,6 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
 
         # Action buttons
         cancel_kb = InlineKeyboardBuilder()
-        cancel_kb.button(text="🔄 Cek Pembayaran", callback_data=f"qris:check:{result.order.id}")
         cancel_kb.button(text="❌ Batalkan Pembayaran", callback_data=f"qris:cancel:{result.order.id}")
         cancel_kb.adjust(1)
 
@@ -849,9 +851,12 @@ async def execute_order(callback: CallbackQuery, state: FSMContext):
             except Exception as e:
                 logger.error("[order] Failed to apply voucher (GoPay): %s", e)
 
-        # Schedule auto-expire after 15 minutes
+        # Schedule auto-expire and auto-check after 15 minutes
         asyncio.create_task(
             _auto_expire_qris(callback.bot, qris_msg, result.order.id)
+        )
+        asyncio.create_task(
+            _auto_check_gopay(callback.bot, result.order.id, final_amount, order_service, callback)
         )
 
     await callback.answer()
@@ -975,7 +980,14 @@ async def cancel_qris_payment(callback: CallbackQuery):
     try:
         from app.infrastructure.database.factory import get_order_repository
         order_repo = await get_order_repository()
+        order = await order_repo.get_by_id(order_id)
         await order_repo.update_status(order_id, "cancelled")
+        
+        # Release lock jika Gopay
+        if order and order.payment_method == "gopay":
+            from app.application.services.factory import get_order_service
+            order_svc = await get_order_service()
+            order_svc.release_payment_lock(order.total_price)
     except Exception as e:
         logger.error("[order] Failed to cancel order %s: %s", order_id, e)
 
@@ -1024,6 +1036,12 @@ async def _auto_expire_qris(bot: Bot, message: Message, order_id: str) -> None:
             # Cancel the order
             await order_repo.update_status(order_id, "cancelled")
             logger.info("[order] ⏰ Auto-expired: order_id=%s", order_id)
+            
+            # Release lock jika Gopay
+            if order.payment_method == "gopay":
+                from app.application.services.factory import get_order_service
+                order_svc = await get_order_service()
+                order_svc.release_payment_lock(order.total_price)
 
             # Clear flow message tracker (won't be needed anymore)
             try:
@@ -1032,20 +1050,62 @@ async def _auto_expire_qris(bot: Bot, message: Message, order_id: str) -> None:
             except Exception:
                 pass
 
-            # Delete the QRIS message
-            try:
-                await message.delete()
             except Exception:
                 try:
-                    await message.edit_caption(
-                        caption=f"⏰ <b>PEMBAYARAN EXPIRED</b>\n\nOrder <code>{order_id}</code> telah dibatalkan karena melewati batas waktu."
+                    await message.edit_text(
+                        text=f"⏰ <b>PEMBAYARAN EXPIRED</b>\n\nOrder <code>{order_id}</code> telah dibatalkan karena melewati batas waktu."
                     )
                 except Exception:
-                    try:
-                        await message.edit_text(
-                            text=f"⏰ <b>PEMBAYARAN EXPIRED</b>\n\nOrder <code>{order_id}</code> telah dibatalkan karena melewati batas waktu."
-                        )
-                    except Exception:
-                        pass
+                    pass
     except Exception as e:
         logger.error("[order] Auto-expire error for %s: %s", order_id, e)
+
+# --- AUTO-POLLING GOPAY ---
+async def _auto_check_gopay(bot: Bot, order_id: str, amount: int, order_service, callback: CallbackQuery) -> None:
+    """Auto-poll payment status for GoPay for up to 15 minutes."""
+    from app.infrastructure.database.factory import get_order_repository
+    from app.infrastructure.payment.factory import get_active_provider
+    from app.presentation.web.gopay_callback import send_gopay_success_notification
+    from app.presentation.order_message_tracker import pop as _pop_track
+    
+    order_repo = await get_order_repository()
+    
+    # 90 kali 10 detik = 900 detik (15 menit)
+    for _ in range(90):
+        await asyncio.sleep(10)
+        
+        # Check if order is still pending in our DB
+        order = await order_repo.get_by_id(order_id)
+        if not order or order.status != "pending":
+            return # Someone cancelled it or it's already paid
+            
+        provider = get_active_provider()
+        if not hasattr(provider, "check_payment_status"):
+            return
+            
+        # Poll gateway Node.js
+        is_paid = await provider.check_payment_status(amount, order.created_at)
+        
+        if is_paid:
+            # Process webhook logic (updates status, delivers account, sends to user)
+            success_order = await order_service.process_gopay_webhook(amount)
+            if success_order:
+                # Cleanup tracked messages
+                try:
+                    tracked = _pop_track(str(order_id))
+                    if tracked:
+                        chat_id_track, msg_ids_track = tracked
+                        for mid in msg_ids_track:
+                            try:
+                                await bot.delete_message(chat_id=chat_id_track, message_id=mid)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                
+                # Send notification
+                await send_gopay_success_notification(success_order)
+                
+                # Release lock
+                order_service.release_payment_lock(amount)
+                return

@@ -43,13 +43,14 @@ class OrderService:
 
     def __init__(
         self,
-        product_repo: ProductRepository,
-        user_repo: UserRepository,
         order_repo: OrderRepository,
+        user_repo: UserRepository,
+        product_repo: ProductRepository,
     ) -> None:
-        self._product_repo = product_repo
-        self._user_repo = user_repo
         self._order_repo = order_repo
+        self._user_repo = user_repo
+        self._product_repo = product_repo
+        self._payment_locks: dict[int, float] = {}
 
     async def execute_order(
         self,
@@ -200,64 +201,39 @@ class OrderService:
     # GoPay Custom QRIS — Unique Amount & Webhook Processing
     # ======================================================================
 
-    async def generate_unique_amount(self, base_price: int, max_retries: int = 20) -> int:
-        """Generate nominal unik (base_price + random 1-999) yang anti-collision.
-
-        Nominal unik diperlukan karena GoPay tidak menyertakan Order ID
-        di notifikasi pembayaran. Matching dilakukan berdasarkan amount.
-
+    async def acquire_payment_lock(self, amount: int, duration_minutes: int = 15) -> bool:
+        """Acquire in-memory lock untuk nominal pas (GoPay QRIS).
+        
+        Mencegah dua user checkout dengan nominal yang sama persis dalam
+        waktu yang bersamaan.
+        
         Args:
-            base_price: Harga dasar sebelum ditambah kode unik (IDR).
-            max_retries: Maksimal percobaan generate (default 20).
-
+            amount: Nominal yang akan dilock.
+            duration_minutes: Durasi lock dalam menit.
+            
         Returns:
-            Nominal unik yang belum ada di pending orders.
-
-        Raises:
-            RuntimeError: Jika gagal generate setelah max_retries kali.
+            True jika berhasil dilock, False jika sedang dilock orang lain.
         """
-        from app.infrastructure.database.connection import get_pool
-        pool = get_pool()
-
-        for attempt in range(max_retries):
-            unique_code = random.randint(1, 10)
-            final_amount = base_price + unique_code
-
-            try:
-                async with pool.acquire() as conn:
-                    count = await conn.fetchval(
-                        """
-                        SELECT COUNT(*) FROM orders
-                        WHERE total_price = $1
-                          AND status = 'pending'
-                          AND payment_method = 'gopay'
-                        """,
-                        final_amount,
-                    )
-
-                if count == 0:
-                    logger.info(
-                        "[order] ✅ Unique amount generated: base=%s code=%s final=%s (attempt %s)",
-                        base_price, unique_code, final_amount, attempt + 1,
-                    )
-                    return final_amount
-
-                logger.debug(
-                    "[order] Amount %s collision (pending exists), retrying...",
-                    final_amount,
-                )
-            except Exception as e:
-                logger.warning("[order] generate_unique_amount DB error: %s", e)
-                # Fallback: return tanpa collision check
-                return final_amount
-
-        # Fallback setelah max_retries: pakai amount terakhir + timestamp suffix
         import time
-        fallback = base_price + (int(time.time()) % 1000)
-        logger.warning(
-            "[order] ⚠️ Max retries reached, using fallback amount: %s", fallback,
-        )
-        return fallback
+        now = time.time()
+        
+        # Bersihkan lock yang expired
+        expired_keys = [k for k, v in self._payment_locks.items() if v < now]
+        for k in expired_keys:
+            del self._payment_locks[k]
+            
+        if amount in self._payment_locks:
+            return False  # Masih dilock
+            
+        self._payment_locks[amount] = now + (duration_minutes * 60)
+        logger.info("[order] 🔒 Lock acquired for amount=%s (duration=%sm)", amount, duration_minutes)
+        return True
+        
+    def release_payment_lock(self, amount: int) -> None:
+        """Release in-memory lock untuk nominal tertentu."""
+        if amount in self._payment_locks:
+            del self._payment_locks[amount]
+            logger.info("[order] 🔓 Lock released for amount=%s", amount)
 
     async def process_gopay_webhook(self, amount: int) -> Optional[Order]:
         """Match pembayaran GoPay dengan pending order berdasarkan amount.

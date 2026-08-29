@@ -12,7 +12,15 @@ def get_product_detail_keyboard(product_id: int, qty: int) -> InlineKeyboardMark
     
     # Baris 2: Metode Pembayaran
     builder.button(text="💳 Buy ( Saldo )", callback_data=f"checkout:saldo:{product_id}:{qty}")
-    builder.button(text="🟢 GoPay QRIS", callback_data=f"checkout:gopay:{product_id}:{qty}")
+    
+    from app.infrastructure.payment.factory import get_active_provider_name
+    provider_name = get_active_provider_name()
+    if provider_name == "gopay_web":
+        btn_text = "🟢 QRIS (GoPay)"
+    else:
+        btn_text = "⚡ QRIS (Pakasir)"
+        
+    builder.button(text=btn_text, callback_data=f"checkout:qris:{product_id}:{qty}")
     
     builder.adjust(3, 2)
     return builder.as_markup()

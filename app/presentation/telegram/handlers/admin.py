@@ -68,8 +68,10 @@ async def cmd_admin(message: Message):
     text = (
         "🔧 <b>ADMIN PANEL</b>\n\n"
         "<b>Payment:</b>\n"
-        "• /setqris - Ganti QRIS payment method\n"
-        "• /getqris - Lihat QRIS method aktif\n\n"
+        "• /setprovider - Ganti Payment Provider (GoPay/Pakasir)\n"
+        "• /getprovider - Lihat Provider aktif\n"
+        "• /setqris - Ganti tipe QRIS gateway\n"
+        "• /getqris - Lihat tipe QRIS aktif\n\n"
         "<b>Produk:</b>\n"
         "• /addproduct - Tambah produk (step-by-step)\n"
         "• /editproduct - Edit produk (interactive)\n"
@@ -176,6 +178,83 @@ async def cmd_getqris(message: Message):
         f"• Code: <code>{_current_qris_method}</code>\n"
         f"• Nama: {info.get('name', 'Unknown')}\n"
         f"• Fee: {info.get('fee', 'Unknown')}\n"
+    )
+    await message.answer(text)
+
+
+# --- /setprovider command ---
+@router.message(Command("setprovider"))
+async def cmd_setprovider(message: Message):
+    if not _is_admin(message.from_user.id):
+        return
+
+    from app.infrastructure.payment.factory import get_active_provider_name
+    active = get_active_provider_name()
+
+    text = (
+        "⚙️ <b>Toggle Payment Provider</b>\n\n"
+        f"Aktif saat ini: <b>{active.upper()}</b>\n\n"
+        "Klik tombol di bawah untuk mengganti:"
+    )
+
+    builder = InlineKeyboardBuilder()
+    
+    if active == "gopay_web":
+        # Jika gopay_web aktif, tombol switch ke pakasir
+        builder.button(text="🔄 Switch ke Pakasir", callback_data="admin:setprovider:pakasir")
+    else:
+        # Jika pakasir aktif, tombol switch ke gopay_web
+        builder.button(text="🔄 Switch ke GoPay QRIS", callback_data="admin:setprovider:gopay_web")
+        
+    builder.adjust(1)
+    
+    await message.answer(text, reply_markup=builder.as_markup())
+
+
+# --- Callback: set payment provider ---
+@router.callback_query(F.data.startswith("admin:setprovider:"))
+async def handle_setprovider(callback: CallbackQuery):
+    if not _is_admin(callback.from_user.id):
+        return await callback.answer("⛔ Unauthorized", show_alert=True)
+
+    provider_name = callback.data.split(":")[2]
+    
+    from app.infrastructure.payment.factory import get_active_provider_name, set_active_provider
+    old_provider = get_active_provider_name()
+    
+    if old_provider == provider_name:
+        return await callback.answer("⚠️ Provider sudah aktif!", show_alert=True)
+        
+    set_active_provider(provider_name)
+    logger.info("[admin] Payment provider changed: %s → %s by user_id=%s", old_provider, provider_name, callback.from_user.id)
+    
+    await callback.message.edit_text(
+        text=(
+            f"✅ <b>Payment Provider Updated!</b>\n\n"
+            f"• Sebelumnya: {old_provider}\n"
+            f"• Sekarang: <b>{provider_name}</b>\n\n"
+            f"💡 Perubahan langsung aktif dan tersimpan di .env!"
+        )
+    )
+    await callback.answer("✅ Updated!")
+
+
+# --- /getprovider command ---
+@router.message(Command("getprovider"))
+async def cmd_getprovider(message: Message):
+    if not _is_admin(message.from_user.id):
+        return
+
+    from app.infrastructure.payment.factory import get_active_provider_name, get_active_provider
+    name = get_active_provider_name()
+    
+    provider = get_active_provider()
+    provider_class = provider.__class__.__name__ if provider else "None"
+    
+    text = (
+        f"📋 <b>Payment Provider Aktif</b>\n\n"
+        f"• Identifier: <code>{name}</code>\n"
+        f"• Class: <code>{provider_class}</code>\n"
     )
     await message.answer(text)
 
