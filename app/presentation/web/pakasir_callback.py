@@ -34,30 +34,50 @@ def set_bot(bot) -> None:
 
 
 async def pakasir_webhook(request: Request):
-    """Handle Pakasir payment callback.
+    """Handle Pakasir payment callback (API v2).
 
-    Pakasir mengirim POST dengan body JSON:
+    Header:
+      X-Secret: {secret}
+
+    Pakasir v2 mengirim POST dengan body JSON:
     {
-      "amount": 22000,
+      "txn_id": "vwiqpcriq",
       "order_id": "xxx",
-      "project": "er-zft",
+      "amount": 22000,
+      "is_sandbox": false,
       "status": "completed",
-      "payment_method": "qris",
-      "completed_at": "2024-09-10T08:07:02.819+07:00"
+      "completed_at": "2025-09-19T01:18:49.678622564Z"
     }
     """
     try:
+        x_secret = request.headers.get("x-secret") or request.headers.get("X-Secret")
+
+        # Check PAKASIR_WEBHOOK_SECRET jika dikonfigurasi
+        from config import settings
+        expected_secret = getattr(settings, "PAKASIR_WEBHOOK_SECRET", "")
+        if expected_secret:
+            if not x_secret or x_secret != expected_secret:
+                logger.warning(
+                    "[pakasir_webhook] ❌ Unauthorized: X-Secret mismatch or missing (got=%s)",
+                    x_secret,
+                )
+                return JSONResponse(
+                    content={"success": False, "message": "Invalid webhook secret"},
+                    status_code=403,
+                )
+
         body = await request.body()
         data = json.loads(body)
 
         order_id = data.get("order_id", "")
+        txn_id = data.get("txn_id", "")
         status = data.get("status", "")
         amount = data.get("amount", 0)
-        payment_method = data.get("payment_method", "")
+        payment_method = data.get("payment_method", "qris")
 
         logger.info(
-            "[pakasir_webhook] 📥 Callback: order_id=%s status=%s amount=%s method=%s",
-            order_id, status, amount, payment_method,
+            "[pakasir_webhook] 📥 Callback v2: order_id=%s txn_id=%s status=%s amount=%s method=%s",
+            order_id, txn_id, status, amount, payment_method,
         )
 
         # Only process completed payments
@@ -65,13 +85,16 @@ async def pakasir_webhook(request: Request):
             logger.info("[pakasir_webhook] Status=%s (bukan completed), skip", status)
             return JSONResponse(content={"success": True}, status_code=200)
 
-        # Verify via Pakasir Transaction Detail API
+        # Verify via Pakasir Transaction Status API v2
         from app.infrastructure.payment.factory import get_active_provider
         provider = get_active_provider()
         if provider and hasattr(provider, "verify_callback"):
-            callback_data = await provider.verify_callback(data)
+            callback_data = await provider.verify_callback(data, secret_header=x_secret)
             if not callback_data:
-                logger.warning("[pakasir_webhook] ❌ Verification failed for order_id=%s", order_id)
+                logger.warning(
+                    "[pakasir_webhook] ❌ Verification failed for order_id=%s txn_id=%s",
+                    order_id, txn_id,
+                )
                 return JSONResponse(content={"success": False, "message": "verification failed"}, status_code=200)
         else:
             logger.warning("[pakasir_webhook] No provider for verification, trusting webhook data")
@@ -80,7 +103,7 @@ async def pakasir_webhook(request: Request):
         if order_id.startswith("DEP-"):
             await _handle_deposit_callback(order_id, amount)
         else:
-            await _handle_order_callback(order_id, amount)
+            await _handle_order_callback(order_id, amount, txn_id=txn_id)
 
         return JSONResponse(content={"success": True}, status_code=200)
 
@@ -131,15 +154,16 @@ async def _handle_deposit_callback(merchant_ref: str, amount: int) -> None:
             logger.error("[pakasir_webhook] Failed to notify user %s: %s", user_id, e)
 
 
-async def _handle_order_callback(order_id: str, amount: int) -> None:
+async def _handle_order_callback(order_id: str, amount: int, txn_id: Optional[str] = None) -> None:
     """Handle order payment callback dari Pakasir."""
     # Update order status
     from app.application.services.factory import get_payment_service
     payment_svc = await get_payment_service()
+    ref_id = txn_id or order_id
     result = await payment_svc.process_order_payment(
         order_id=order_id,
         status="PAID",
-        payment_ref=f"pakasir:{order_id}",
+        payment_ref=f"pakasir:{ref_id}",
     )
 
     if not result.success:

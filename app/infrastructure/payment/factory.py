@@ -76,11 +76,12 @@ def get_active_provider() -> Optional[PaymentProvider]:
 
 
 def _init_pakasir() -> Optional[PaymentProvider]:
-    """Initialize Pakasir provider."""
+    """Initialize Pakasir provider (v2)."""
     base_url = getattr(settings, "PAKASIR_BASE_URL", "")
     project_slug = getattr(settings, "PAKASIR_PROJECT_SLUG", "")
     api_key = getattr(settings, "PAKASIR_API_KEY", "")
     method = getattr(settings, "PAKASIR_PAYMENT_METHOD", "qris")
+    webhook_secret = getattr(settings, "PAKASIR_WEBHOOK_SECRET", "")
 
     if not project_slug or not api_key:
         logger.warning("[payment] Pakasir belum di-configure (missing slug/api_key)")
@@ -92,9 +93,10 @@ def _init_pakasir() -> Optional[PaymentProvider]:
         project_slug=project_slug,
         api_key=api_key,
         payment_method=method,
+        webhook_secret=webhook_secret,
     )
     logger.info(
-        "[payment] ✅ PakasirProvider initialized (project=%s, method=%s)",
+        "[payment] ✅ PakasirProvider initialized v2 (project=%s, method=%s)",
         project_slug, method,
     )
     return provider

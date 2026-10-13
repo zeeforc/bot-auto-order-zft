@@ -39,6 +39,7 @@ PAKASIR_BASE_URL = os.getenv("PAKASIR_BASE_URL", "https://app.pakasir.com")
 PAKASIR_PROJECT_SLUG = os.getenv("PAKASIR_PROJECT_SLUG", "")
 PAKASIR_API_KEY = os.getenv("PAKASIR_API_KEY", "")
 PAKASIR_PAYMENT_METHOD = os.getenv("PAKASIR_PAYMENT_METHOD", "qris")
+PAKASIR_WEBHOOK_SECRET = os.getenv("PAKASIR_WEBHOOK_SECRET", "")
 
 # Webhook Configuration
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
